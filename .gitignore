@@ -1,0 +1,18 @@
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock.bak
+
+# Logs and runtime traces
+*.log
+**/*.log
+
+# OS generated files
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# Cache and temporary directories
+.cache/
+**/.cache/
+scratch/

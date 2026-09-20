@@ -1,0 +1,12 @@
+[package]
+name = "krun-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Safe and low-level FFI bindings to libkrun"
+license = "Apache-2.0"
+
+[dependencies]
+libc = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]

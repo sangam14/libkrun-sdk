@@ -1,0 +1,1182 @@
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+use microvm_core::{
+    collect_process_stats, ImageReference, MicroVmBuilder, OciArtifact, OciClient, OciLayout,
+    Preflight, StateManager, VmStatus,
+};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+
+#[derive(Parser)]
+#[command(name = "microvm")]
+#[command(about = "Run OCI container images in hardware-isolated microVMs with libkrun", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run an OCI container image as a microVM
+    Run {
+        /// OCI image reference (e.g. alpine:latest, ubuntu:22.04) or empty if --bundle is used
+        #[arg(default_value = "")]
+        image: String,
+
+        /// Path to an unpacked OCI runtime bundle (containing config.json and rootfs/)
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+
+        /// Number of virtual CPUs
+        #[arg(short = 'c', long, default_value_t = 2)]
+        cpus: u8,
+
+        /// RAM in MiB
+        #[arg(short = 'm', long, default_value_t = 512)]
+        memory: u32,
+
+        /// Port forwarding rules in host:guest format (e.g. 8080:80)
+        #[arg(short = 'p', long = "port")]
+        ports: Vec<String>,
+
+        /// Mount host directory via VirtioFS: <host_path>:<tag>[:ro]
+        #[arg(short = 'v', long = "volume")]
+        volumes: Vec<String>,
+
+        /// Attach an OCI artifact (models, datasets, blobs) via VirtioFS: <reference>:<tag>[:ro]
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+
+        /// Mount an isolated Copy-on-Write (CoW) sandbox of a host directory: <host_path>:<tag>
+        #[arg(long = "workspace-cow")]
+        workspace_cow: Vec<String>,
+
+        /// Environment variables (KEY=VALUE)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+
+        /// Working directory inside guest
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Skip preflight virtualization checks
+        #[arg(long)]
+        no_preflight: bool,
+
+        /// libkrun log level (0=Off, 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Trace)
+        #[arg(long)]
+        log_level: Option<u32>,
+
+        /// Keep STDIN open even if not attached
+        #[arg(short = 'i', long)]
+        interactive: bool,
+
+        /// Allocate a pseudo-TTY
+        #[arg(short = 't', long)]
+        tty: bool,
+
+        /// Run container in background and print container ID
+        #[arg(short = 'd', long)]
+        detach: bool,
+
+        /// Completely isolate guest without network interfaces
+        #[arg(long)]
+        no_network: bool,
+
+        /// Network mode: tsi (default), none (air-gapped), or unix:<socket_path>
+        #[arg(long, default_value = "tsi")]
+        net: String,
+
+        /// Custom DNS nameservers (e.g. 8.8.8.8,1.1.1.1; defaults to autonomous resilient fallback)
+        #[arg(long = "dns")]
+        dns: Vec<String>,
+
+        /// Custom guest hostname (defaults to microVM instance ID)
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// Guest resource limits (e.g. RLIMIT_NOFILE=1024:2048)
+        #[arg(long)]
+        rlimits: Option<String>,
+
+        /// Optional command to override ENTRYPOINT/CMD
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+
+    /// List running and recent microVMs
+    Ps {
+        /// Show all microVMs (including stopped)
+        #[arg(short = 'a', long)]
+        all: bool,
+
+        /// Do not truncate IDs and image names
+        #[arg(long = "no-trunc")]
+        no_trunc: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Stop a running microVM by ID or PID
+    Stop {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Remove one or more stopped microVMs
+    Rm {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Force removal of a running microVM (stops it first)
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Return low-level configuration and runtime details on a microVM
+    Inspect {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Display live resource usage statistics for running microVMs
+    Stats {
+        /// ID or PID of a specific microVM (omit to display all running microVMs)
+        id: Option<String>,
+
+        /// Disable streaming live stats and only output the current snapshot
+        #[arg(long = "no-stream")]
+        no_stream: bool,
+
+        /// Output telemetry formatted as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Display running supervisor and thread statistics of a microVM
+    Top {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Copy files/folders between host and a microVM
+    Cp {
+        /// Source path (e.g. ./file.txt or <vm-id>:<path>)
+        src: String,
+
+        /// Destination path (e.g. <vm-id>:<path> or ./file.txt)
+        dest: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// View console logs of a microVM
+    Logs {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Follow log output continuously
+        #[arg(short = 'f', long)]
+        follow: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Remove stopped instances and temporary cache directories
+    Prune {
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Pull and cache an OCI image rootfs locally
+    Pull {
+        /// OCI image reference
+        image: String,
+
+        /// Custom cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Run preflight checks to verify hypervisor support
+    Preflight {
+        /// Ports to check availability for
+        #[arg(short, long)]
+        port: Vec<u16>,
+    },
+
+    /// Print system, virtualization, and resource cache status
+    Info,
+
+    /// Manage detached OCI artifacts (models, datasets, toolchains)
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArtifactCommands {
+    /// Pull and cache an OCI artifact locally
+    Pull {
+        /// OCI artifact reference (e.g. ghcr.io/owner/model:latest)
+        artifact: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// List locally cached OCI artifacts
+    List {
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
+
+    let default_data_dir = || {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".cache/krun-microvm")
+    };
+
+    match cli.command {
+        Commands::Run {
+            image,
+            bundle,
+            cpus,
+            memory,
+            ports,
+            volumes,
+            artifacts,
+            workspace_cow,
+            env,
+            workdir,
+            data_dir,
+            no_preflight,
+            log_level,
+            interactive,
+            tty,
+            detach,
+            no_network,
+            net,
+            dns,
+            hostname,
+            rlimits,
+            cmd,
+        } => {
+            let mut builder = if let Some(ref b) = bundle {
+                if !detach {
+                    println!("📦 Loading MicroVM from OCI bundle: {}", b.display());
+                }
+                MicroVmBuilder::from_bundle(b)?
+            } else if !image.is_empty() {
+                if !detach {
+                    println!("🚀 Launching MicroVM for image '{}'...", image);
+                }
+                MicroVmBuilder::new(image)
+            } else {
+                bail!("Please specify an image reference (e.g. 'alpine:latest') or an OCI bundle path with '--bundle <path>'");
+            };
+
+            builder = builder
+                .cpus(cpus)
+                .memory_mb(memory)
+                .preflight(!no_preflight)
+                .interactive(interactive)
+                .tty(tty)
+                .detach(detach)
+                .no_network(no_network);
+
+            if let Some(rlim) = rlimits {
+                builder = builder.rlimits(rlim);
+            }
+
+            if let Some(dd) = data_dir {
+                builder = builder.data_dir(dd);
+            }
+
+            if let Some(w) = workdir {
+                builder = builder.workdir(w);
+            }
+
+            if let Some(lvl) = log_level {
+                builder = builder.log_level(lvl);
+            }
+
+            if no_network || net == "none" {
+                builder = builder.network_mode(microvm_core::NetworkMode::None);
+            } else if let Some(path_str) = net.strip_prefix("unix:") {
+                builder = builder.network_mode(microvm_core::NetworkMode::UnixStream(PathBuf::from(path_str)));
+            } else {
+                builder = builder.network_mode(microvm_core::NetworkMode::Tsi);
+            }
+
+            if !dns.is_empty() {
+                builder = builder.dns_servers(dns);
+            }
+
+            if let Some(h) = hostname {
+                builder = builder.hostname(h);
+            }
+
+            if !cmd.is_empty() {
+                builder = builder.cmd(cmd);
+            }
+
+            for p in ports {
+                let parts: Vec<&str> = p.split(':').collect();
+                if parts.len() != 2 {
+                    bail!("Invalid port forward format '{}', expected host:guest", p);
+                }
+                let host: u16 = parts[0].parse().context("Invalid host port")?;
+                let guest: u16 = parts[1].parse().context("Invalid guest port")?;
+                builder = builder.port_forward(host, guest);
+            }
+
+            for v in volumes {
+                let parts: Vec<&str> = v.split(':').collect();
+                if parts.len() < 2 {
+                    bail!("Invalid volume format '{}', expected host_path:tag[:ro]", v);
+                }
+                let host_path = PathBuf::from(parts[0]);
+                let tag = parts[1];
+                let ro = parts.get(2).map_or(false, |&s| s == "ro");
+                builder = builder.virtiofs(tag, host_path, ro);
+            }
+
+            for a in artifacts {
+                let (rem, ro) = if let Some(stripped) = a.strip_suffix(":ro") {
+                    (stripped, true)
+                } else if let Some(stripped) = a.strip_suffix(":rw") {
+                    (stripped, false)
+                } else {
+                    (a.as_str(), false)
+                };
+
+                let (reference, tag) = match rem.rfind(':') {
+                    Some(idx) => (&rem[..idx], &rem[idx + 1..]),
+                    None => bail!(
+                        "Invalid artifact format '{}', expected <reference>:<tag>[:ro]",
+                        a
+                    ),
+                };
+                builder = builder.attach_artifact(reference, tag, ro);
+            }
+
+            for w in workspace_cow {
+                let (host_path, tag) = match w.rfind(':') {
+                    Some(idx) => (&w[..idx], &w[idx + 1..]),
+                    None => bail!(
+                        "Invalid workspace-cow format '{}', expected <host_path>:<tag>",
+                        w
+                    ),
+                };
+                builder = builder.workspace_cow(PathBuf::from(host_path), tag);
+            }
+
+            for e in env {
+                if let Some((k, v)) = e.split_once('=') {
+                    builder = builder.env(k, v);
+                } else {
+                    bail!("Invalid env var format '{}', expected KEY=VALUE", e);
+                }
+            }
+
+            let mut vm = builder.run().await.context("Failed to start microVM")?;
+            if detach {
+                println!("{}", vm.id());
+                return Ok(());
+            }
+
+            println!("✅ MicroVM active! ID: {}, PID: {:?}", vm.id(), vm.pid());
+
+            // Concurrently wait for VM exit or Ctrl+C signal
+            let exit_code = tokio::select! {
+                status_res = vm.wait() => {
+                    let status = status_res?;
+                    println!("🛑 MicroVM exited with status: {}", status);
+                    status.code().unwrap_or(0)
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\n⚠️ Received interrupt (Ctrl+C). Gracefully stopping microVM {}...", vm.id());
+                    let _ = vm.stop().await;
+                    130 // Standard exit code: 128 + SIGINT
+                }
+            };
+
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+
+        Commands::Ps { all, no_trunc, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vms = StateManager::list(&base)?;
+
+            let displayed: Vec<_> = vms
+                .into_iter()
+                .filter(|v| all || v.status == VmStatus::Running)
+                .collect();
+
+            if displayed.is_empty() {
+                println!("No {} microVMs found.", if all { "" } else { "running" });
+                return Ok(());
+            }
+
+            println!(
+                "{:<16} {:<24} {:<8} {:<18} {:<18}",
+                "INSTANCE ID", "IMAGE", "PID", "STATUS", "PORTS"
+            );
+            println!("{:-<90}", "");
+
+            for vm in displayed {
+                let id_display = if no_trunc || vm.id.len() <= 12 {
+                    vm.id.clone()
+                } else {
+                    vm.id[..12].to_string()
+                };
+
+                let time_rel = format_duration_since(vm.created_at);
+                let status_str = match vm.status {
+                    VmStatus::Running => format!("● Up ({})", time_rel),
+                    VmStatus::Stopped => format!("○ Exited ({})", time_rel),
+                };
+
+                let port_str = if vm.port_forwards.is_empty() {
+                    "-".to_string()
+                } else {
+                    vm.port_forwards
+                        .iter()
+                        .map(|p| format!("{}:{}", p.host, p.guest))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+
+                let image_display = if vm.image.len() > 23 && !no_trunc {
+                    format!("{}...", &vm.image[..20])
+                } else {
+                    vm.image.clone()
+                };
+
+                println!(
+                    "{:<16} {:<24} {:<8} {:<18} {:<18}",
+                    id_display, image_display, vm.pid, status_str, port_str
+                );
+            }
+        }
+
+        Commands::Stop { id, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            println!("Stopping microVM '{}'...", id);
+            StateManager::stop(&base, &id)?;
+            println!("✅ MicroVM '{}' stopped and state cleaned up.", id);
+        }
+
+        Commands::Rm { id, force, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            match StateManager::delete(&base, &id, force) {
+                Ok(vm) => {
+                    println!("✅ Removed microVM '{}' (Image: {}, PID: {})", vm.id, vm.image, vm.pid);
+                }
+                Err(e) => {
+                    bail!("Failed to remove microVM '{}': {}", id, e);
+                }
+            }
+        }
+
+        Commands::Inspect { id, json, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vm = match StateManager::find(&base, &id)? {
+                Some(v) => v,
+                None => bail!("MicroVM '{}' not found in state", id),
+            };
+
+            let is_alive = vm.is_process_alive();
+            let telemetry = if is_alive {
+                collect_process_stats(vm.pid)
+            } else {
+                None
+            };
+
+            let config_json_path = vm.instance_dir.join("config.json");
+            let oci_config: Option<serde_json::Value> = if config_json_path.exists() {
+                std::fs::read_to_string(&config_json_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+            } else {
+                None
+            };
+
+            let console_log = vm.instance_dir.join("console.log");
+
+            if json {
+                let info = json!({
+                    "id": vm.id,
+                    "pid": vm.pid,
+                    "image": vm.image,
+                    "status": if is_alive { "Running" } else { "Stopped" },
+                    "created_at": vm.created_at,
+                    "port_forwards": vm.port_forwards,
+                    "instance_dir": vm.instance_dir.display().to_string(),
+                    "console_log": console_log.display().to_string(),
+                    "telemetry": telemetry,
+                    "oci_config": oci_config,
+                });
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!("📦 MicroVM Inspection: {}", vm.id);
+                println!("{:-<60}", "");
+                println!("  Status:          {}", if is_alive { format!("● Running (PID {})", vm.pid) } else { "○ Stopped".to_string() });
+                println!("  Image:           {}", vm.image);
+                println!("  Created:         {} ({})", format_duration_since(vm.created_at), vm.created_at);
+                println!("  Instance Path:   {}", vm.instance_dir.display());
+                println!("  Console Log:     {}", console_log.display());
+                if !vm.port_forwards.is_empty() {
+                    let ports: Vec<String> = vm.port_forwards.iter().map(|p| format!("{}:{}", p.host, p.guest)).collect();
+                    println!("  Port Mappings:   {}", ports.join(", "));
+                }
+
+                if let Some(ref oci) = oci_config {
+                    if let Some(entrypoint) = oci.get("entrypoint").and_then(|v| v.as_array()) {
+                        let ep: Vec<&str> = entrypoint.iter().filter_map(|s| s.as_str()).collect();
+                        println!("  Entrypoint:      {:?}", ep);
+                    }
+                    if let Some(cmd) = oci.get("cmd").and_then(|v| v.as_array()) {
+                        let c: Vec<&str> = cmd.iter().filter_map(|s| s.as_str()).collect();
+                        println!("  Cmd:             {:?}", c);
+                    }
+                    if let Some(workdir) = oci.get("working_dir").and_then(|v| v.as_str()) {
+                        if !workdir.is_empty() {
+                            println!("  Working Dir:     {}", workdir);
+                        }
+                    }
+                }
+
+                if let Some(ref stats) = telemetry {
+                    println!("\n  Telemetry (Live):");
+                    println!("    CPU Time (Total):  {:.2} ms (User: {:.2} ms, Sys: {:.2} ms)",
+                        stats.total_cpu_ns as f64 / 1_000_000.0,
+                        stats.user_cpu_ns as f64 / 1_000_000.0,
+                        stats.kernel_cpu_ns as f64 / 1_000_000.0,
+                    );
+                    println!("    Memory (RSS):      {}", format_bytes(stats.memory_rss_bytes));
+                    println!("    Memory (Virtual):  {}", format_bytes(stats.memory_vsize_bytes));
+                    println!("    Active Threads:    {}", stats.threads);
+                    println!("    Page Faults:       {} (Major: {})", stats.page_faults, stats.major_page_faults);
+                }
+            }
+        }
+
+        Commands::Stats {
+            id,
+            no_stream,
+            json,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+
+            if json {
+                let vms = StateManager::list(&base)?;
+                let targets: Vec<_> = match id {
+                    Some(ref target_id) => {
+                        let vm = StateManager::find(&base, target_id)?
+                            .ok_or_else(|| anyhow::anyhow!("MicroVM '{}' not found", target_id))?;
+                        vec![vm]
+                    }
+                    None => vms.into_iter().filter(|v| v.is_process_alive()).collect(),
+                };
+
+                let mut list = Vec::new();
+                for vm in targets {
+                    let stats = if vm.is_process_alive() {
+                        collect_process_stats(vm.pid)
+                    } else {
+                        None
+                    };
+                    list.push(json!({
+                        "id": vm.id,
+                        "pid": vm.pid,
+                        "image": vm.image,
+                        "status": if vm.is_process_alive() { "Running" } else { "Stopped" },
+                        "stats": stats,
+                    }));
+                }
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+
+            let sample_interval = std::time::Duration::from_millis(if no_stream { 250 } else { 1000 });
+
+            loop {
+                let vms = StateManager::list(&base)?;
+                let active_vms: Vec<_> = match id {
+                    Some(ref target_id) => {
+                        let vm = StateManager::find(&base, target_id)?
+                            .ok_or_else(|| anyhow::anyhow!("MicroVM '{}' not found", target_id))?;
+                        if !vm.is_process_alive() {
+                            bail!("MicroVM '{}' is not running (PID {})", vm.id, vm.pid);
+                        }
+                        vec![vm]
+                    }
+                    None => vms.into_iter().filter(|v| v.is_process_alive()).collect(),
+                };
+
+                if active_vms.is_empty() {
+                    println!("No running microVMs found.");
+                    return Ok(());
+                }
+
+                // Sample 1
+                let mut samples1 = Vec::new();
+                for vm in &active_vms {
+                    if let Some(s) = collect_process_stats(vm.pid) {
+                        samples1.push((vm.clone(), std::time::Instant::now(), s));
+                    }
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(sample_interval) => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        if !no_stream {
+                            println!();
+                        }
+                        return Ok(());
+                    }
+                }
+
+                // Sample 2
+                let mut rows = Vec::new();
+                for (vm, t1, s1) in samples1 {
+                    if let Some(s2) = collect_process_stats(vm.pid) {
+                        let t2 = std::time::Instant::now();
+                        let delta_wall = t2.duration_since(t1).as_nanos() as f64;
+                        let delta_cpu = s2.total_cpu_ns.saturating_sub(s1.total_cpu_ns) as f64;
+                        let cpu_pct = if delta_wall > 0.0 {
+                            (delta_cpu / delta_wall) * 100.0
+                        } else {
+                            0.0
+                        };
+                        rows.push((vm, cpu_pct, s2));
+                    }
+                }
+
+                if !no_stream {
+                    // Clear terminal and reset cursor
+                    print!("\x1B[2J\x1B[1;1H");
+                }
+
+                println!(
+                    "{:<14} {:<24} {:<10} {:<14} {:<14} {:<8} {:<12}",
+                    "CONTAINER ID", "IMAGE", "CPU %", "MEM USAGE", "VIRTUAL MEM", "PIDS", "PAGE FAULTS"
+                );
+                println!("{:-<100}", "");
+
+                for (vm, cpu_pct, stats) in rows {
+                    let short_id = if vm.id.len() > 12 { &vm.id[..12] } else { &vm.id };
+                    let short_img = if vm.image.len() > 23 { format!("{}...", &vm.image[..20]) } else { vm.image };
+                    println!(
+                        "{:<14} {:<24} {:<10} {:<14} {:<14} {:<8} {:<12}",
+                        short_id,
+                        short_img,
+                        format!("{:.2}%", cpu_pct),
+                        format_bytes(stats.memory_rss_bytes),
+                        format_bytes(stats.memory_vsize_bytes),
+                        stats.threads,
+                        stats.page_faults,
+                    );
+                }
+
+                if no_stream {
+                    break;
+                }
+            }
+        }
+
+        Commands::Top { id, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vm = match StateManager::find(&base, &id)? {
+                Some(v) => v,
+                None => bail!("MicroVM '{}' not found in state", id),
+            };
+
+            if !vm.is_process_alive() {
+                bail!("MicroVM '{}' is not running (PID {})", vm.id, vm.pid);
+            }
+
+            let stats = match collect_process_stats(vm.pid) {
+                Some(s) => s,
+                None => bail!("Failed to collect process stats for PID {}", vm.pid),
+            };
+
+            println!("Top - MicroVM {} (PID {})", vm.id, vm.pid);
+            println!("{:-<75}", "");
+            println!("{:<10} {:<10} {:<16} {:<16} {:<14}", "PID", "THREADS", "USER CPU", "SYS CPU", "RSS MEMORY");
+            println!(
+                "{:<10} {:<10} {:<16} {:<16} {:<14}",
+                vm.pid,
+                stats.threads,
+                format!("{:.2} ms", stats.user_cpu_ns as f64 / 1_000_000.0),
+                format!("{:.2} ms", stats.kernel_cpu_ns as f64 / 1_000_000.0),
+                format_bytes(stats.memory_rss_bytes)
+            );
+        }
+
+        Commands::Cp { src, dest, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            if let Some((vm_id, guest_path)) = dest.split_once(':') {
+                let src_path = PathBuf::from(&src);
+                if !src_path.exists() {
+                    bail!("Source path does not exist: {}", src);
+                }
+                StateManager::copy_into(&base, vm_id, &src_path, guest_path)?;
+                println!("✅ Successfully copied '{}' into '{}:{}'", src, vm_id, guest_path);
+            } else if let Some((vm_id, guest_path)) = src.split_once(':') {
+                let dest_path = PathBuf::from(&dest);
+                StateManager::copy_from(&base, vm_id, guest_path, &dest_path)?;
+                println!("✅ Successfully copied '{}:{}' to '{}'", vm_id, guest_path, dest);
+            } else {
+                bail!("Invalid cp syntax. Usage:\n  microvm cp <src_host> <vm_id>:<dest_guest>\n  microvm cp <vm_id>:<src_guest> <dest_host>");
+            }
+        }
+
+        Commands::Logs { id, follow, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vms = StateManager::list(&base)?;
+            let target = vms.iter().find(|v| v.id == id || v.id.starts_with(&id) || v.pid.to_string() == id);
+
+            let vm = match target {
+                Some(v) => v,
+                None => bail!("MicroVM '{}' not found in state", id),
+            };
+
+            let console_log = vm.instance_dir.join("console.log");
+            let trace_log = vm.instance_dir.join("rootfs/init.trace.log");
+            let log_file = if console_log.exists() {
+                console_log
+            } else if trace_log.exists() {
+                trace_log
+            } else if follow {
+                console_log
+            } else {
+                println!("No log output found for VM '{}'", id);
+                return Ok(());
+            };
+
+            use std::io::{Read, Write};
+            let mut file = match std::fs::File::open(&log_file) {
+                Ok(f) => f,
+                Err(_) if follow => {
+                    let start = std::time::Instant::now();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        if let Ok(f) = std::fs::File::open(&log_file) {
+                            break f;
+                        }
+                        if start.elapsed() > std::time::Duration::from_secs(5) {
+                            bail!("Log file '{}' was not created after 5 seconds", log_file.display());
+                        }
+                    }
+                }
+                Err(e) => bail!("Failed to open log file '{}': {}", log_file.display(), e),
+            };
+
+            let mut buffer = Vec::new();
+            let _ = file.read_to_end(&mut buffer);
+            if !buffer.is_empty() {
+                print!("{}", String::from_utf8_lossy(&buffer));
+                let _ = std::io::stdout().flush();
+            }
+
+            if follow {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let mut new_bytes = Vec::new();
+                    let n = file.read_to_end(&mut new_bytes)?;
+                    if n > 0 {
+                        print!("{}", String::from_utf8_lossy(&new_bytes));
+                        let _ = std::io::stdout().flush();
+                    } else {
+                        let vms = StateManager::list(&base)?;
+                        let is_alive = vms.iter().any(|v| (v.id == vm.id) && v.is_process_alive());
+                        if !is_alive {
+                            let mut final_bytes = Vec::new();
+                            let _ = file.read_to_end(&mut final_bytes);
+                            if !final_bytes.is_empty() {
+                                print!("{}", String::from_utf8_lossy(&final_bytes));
+                                let _ = std::io::stdout().flush();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Commands::Prune { data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            println!("Pruning stopped microVMs and staging caches...");
+            let summary = StateManager::prune(&base)?;
+            println!(
+                "✅ Pruned {} dead instance directories and {} staging cache directories.",
+                summary.pruned_instances, summary.pruned_layers
+            );
+        }
+
+        Commands::Pull { image, data_dir } => {
+            let cache_base = data_dir.unwrap_or_else(default_data_dir);
+
+            println!("📦 Pulling image '{}'...", image);
+            let reference = ImageReference::parse(&image)?;
+            let (rootfs, config) = if reference.is_local_layout {
+                let layout_path = reference.layout_path.as_ref().unwrap();
+                println!("📂 Loading local OCI image layout from '{}'...", layout_path.display());
+                let (rootfs, config) = OciLayout::load(layout_path, Some(&reference.tag), &cache_base)?;
+                println!("✅ Offline OCI layout loaded and unpacked!");
+                (rootfs, config)
+            } else {
+                let client = OciClient::new();
+                let (rootfs, config) = client.pull_and_unpack(&reference, &cache_base).await?;
+                println!("✅ Image successfully pulled and cached!");
+                (rootfs, config)
+            };
+
+            println!("   Rootfs path: {}", rootfs.display());
+            println!("   Entrypoint: {:?}", config.entrypoint);
+            println!("   Cmd: {:?}", config.cmd);
+            println!("   Env count: {}", config.env.len());
+        }
+
+        Commands::Preflight { port } => {
+            println!("🔍 Running MicroVM preflight checks...\n");
+            let workdir = default_data_dir();
+            let results = Preflight::run_all(&port, &workdir);
+
+            let mut all_ok = true;
+            for r in results {
+                let status_icon = if r.passed { " [PASS]" } else { "❌ [FAIL]" };
+                println!("{} {}: {}", status_icon, r.name, r.message);
+                if !r.passed {
+                    all_ok = false;
+                }
+            }
+
+            if all_ok {
+                println!("\n🎉 System is fully ready to run hardware-isolated microVMs!");
+            } else {
+                println!("\n⚠️ Some preflight checks failed. Please address them before running VMs.");
+            }
+        }
+
+        Commands::Info => {
+            let base = default_data_dir();
+            let vms = StateManager::list(&base).unwrap_or_default();
+            let running_count = vms.iter().filter(|v| v.is_process_alive()).count();
+            let stopped_count = vms.len().saturating_sub(running_count);
+
+            let layers_size = dir_size(&base.join("layers"));
+            let artifacts_size = dir_size(&base.join("artifacts"));
+            let instances_size = dir_size(&base.join("instances"));
+            let total_cache = layers_size + artifacts_size + instances_size;
+
+            let cpus = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1);
+            let mem_str = host_memory_bytes()
+                .map(format_bytes)
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            println!("libkrun-microvm SDK (Rust Edition)");
+            println!("--------------------------------------------------");
+            println!("OS:                      {}", std::env::consts::OS);
+            println!("Architecture:            {}", std::env::consts::ARCH);
+            println!(
+                "Hypervisor:              {}",
+                if cfg!(target_os = "macos") {
+                    "Apple Silicon Hypervisor.framework"
+                } else {
+                    "Linux KVM"
+                }
+            );
+            println!("Host CPUs:               {}", cpus);
+            println!("Host Memory:             {}", mem_str);
+            println!("Data Cache Root:         {}", base.display());
+            println!("--------------------------------------------------");
+            println!("Active MicroVMs:         {} running ({} total)", running_count, vms.len());
+            println!("  - Running:             {}", running_count);
+            println!("  - Stopped:             {}", stopped_count);
+            println!("Disk Utilization:");
+            println!("  - OCI Layer Cache:     {}", format_bytes(layers_size));
+            println!("  - OCI Artifacts:       {}", format_bytes(artifacts_size));
+            println!("  - MicroVM Instances:   {}", format_bytes(instances_size));
+            println!("  - Total Disk Used:     {}", format_bytes(total_cache));
+            println!("libkrun Library:         Dynamic linkage (/opt/homebrew/lib or system lib)");
+        }
+
+        Commands::Artifact { command } => match command {
+            ArtifactCommands::Pull { artifact, data_dir } => {
+                let cache_base = data_dir.unwrap_or_else(default_data_dir);
+                println!("📦 Pulling OCI artifact '{}'...", artifact);
+                let reference = ImageReference::parse(&artifact)?;
+                let client = OciClient::new();
+                let dest = client.pull_artifact(&reference, &cache_base).await?;
+                println!("✅ OCI artifact pulled and cached successfully!");
+                println!("   Artifact directory: {}", dest.display());
+            }
+            ArtifactCommands::List { data_dir } => {
+                let cache_base = data_dir.unwrap_or_else(default_data_dir);
+                let artifacts = OciArtifact::list_cached(&cache_base)?;
+                if artifacts.is_empty() {
+                    println!("No locally cached OCI artifacts found.");
+                    return Ok(());
+                }
+
+                println!(
+                    "{:<40} {:<20} {:<12} {:<20}",
+                    "REFERENCE", "DIGEST", "FILES", "PULLED AT"
+                );
+                println!("{:-<95}", "");
+                for a in artifacts {
+                    let short_digest = if a.digest.len() > 19 {
+                        format!("{}...", &a.digest[..16])
+                    } else {
+                        a.digest.clone()
+                    };
+                    let time_str = match std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(a.created_at)) {
+                        Some(t) => {
+                            let dur = std::time::SystemTime::now().duration_since(t).unwrap_or_default();
+                            if dur.as_secs() < 60 {
+                                format!("{}s ago", dur.as_secs())
+                            } else if dur.as_secs() < 3600 {
+                                format!("{}m ago", dur.as_secs() / 60)
+                            } else if dur.as_secs() < 86400 {
+                                format!("{}h ago", dur.as_secs() / 3600)
+                            } else {
+                                format!("{}d ago", dur.as_secs() / 86400)
+                            }
+                        }
+                        None => "Unknown".to_string(),
+                    };
+                    println!(
+                        "{:<40} {:<20} {:<12} {:<20}",
+                        a.reference,
+                        short_digest,
+                        format!("{} file(s)", a.files.len()),
+                        time_str,
+                    );
+                }
+            }
+        },
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_duration_since(timestamp: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now < timestamp {
+        return "just now".to_string();
+    }
+    let elapsed = now - timestamp;
+    if elapsed < 60 {
+        format!("{}s ago", elapsed)
+    } else if elapsed < 3600 {
+        format!("{}m ago", elapsed / 60)
+    } else if elapsed < 86400 {
+        format!("{}h ago", elapsed / 3600)
+    } else {
+        format!("{}d ago", elapsed / 86400)
+    }
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(meta) = p.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+fn host_memory_bytes() -> Option<u64> {
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if pages > 0 && page_size > 0 {
+        Some((pages as u64).saturating_mul(page_size as u64))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_parse_run_artifact_and_cow() {
+        let args = vec![
+            "microvm",
+            "run",
+            "--artifact",
+            "ghcr.io/owner/model:v1:weights:ro",
+            "--workspace-cow",
+            "/tmp/test-project:workspace",
+            "alpine:latest",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Run {
+                artifacts,
+                workspace_cow,
+                image,
+                ..
+            } => {
+                assert_eq!(artifacts, vec!["ghcr.io/owner/model:v1:weights:ro"]);
+                assert_eq!(workspace_cow, vec!["/tmp/test-project:workspace"]);
+                assert_eq!(image, "alpine:latest");
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_artifact_commands() {
+        let pull_args = vec!["microvm", "artifact", "pull", "ghcr.io/owner/weights:v1"];
+        let cli = Cli::try_parse_from(pull_args).unwrap();
+        match cli.command {
+            Commands::Artifact {
+                command: ArtifactCommands::Pull { artifact, .. },
+            } => {
+                assert_eq!(artifact, "ghcr.io/owner/weights:v1");
+            }
+            _ => panic!("Expected ArtifactCommands::Pull"),
+        }
+
+        let list_args = vec!["microvm", "artifact", "list"];
+        let cli = Cli::try_parse_from(list_args).unwrap();
+        match cli.command {
+            Commands::Artifact {
+                command: ArtifactCommands::List { .. },
+            } => {}
+            _ => panic!("Expected ArtifactCommands::List"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_stats_and_inspect() {
+        let stats_args = vec!["microvm", "stats", "--no-stream", "--json"];
+        let cli = Cli::try_parse_from(stats_args).unwrap();
+        match cli.command {
+            Commands::Stats { id, no_stream, json, .. } => {
+                assert!(id.is_none());
+                assert!(no_stream);
+                assert!(json);
+            }
+            _ => panic!("Expected Commands::Stats"),
+        }
+
+        let inspect_args = vec!["microvm", "inspect", "test-vm-123", "--json"];
+        let cli = Cli::try_parse_from(inspect_args).unwrap();
+        match cli.command {
+            Commands::Inspect { id, json, .. } => {
+                assert_eq!(id, "test-vm-123");
+                assert!(json);
+            }
+            _ => panic!("Expected Commands::Inspect"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_rm_and_top() {
+        let rm_args = vec!["microvm", "rm", "-f", "test-vm-123"];
+        let cli = Cli::try_parse_from(rm_args).unwrap();
+        match cli.command {
+            Commands::Rm { id, force, .. } => {
+                assert_eq!(id, "test-vm-123");
+                assert!(force);
+            }
+            _ => panic!("Expected Commands::Rm"),
+        }
+
+        let top_args = vec!["microvm", "top", "test-vm-123"];
+        let cli = Cli::try_parse_from(top_args).unwrap();
+        match cli.command {
+            Commands::Top { id, .. } => {
+                assert_eq!(id, "test-vm-123");
+            }
+            _ => panic!("Expected Commands::Top"),
+        }
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1024 * 1024 * 10), "10.0 MiB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.00 GiB");
+    }
+}

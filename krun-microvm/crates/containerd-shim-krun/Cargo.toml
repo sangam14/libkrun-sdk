@@ -1,0 +1,30 @@
+[package]
+name = "containerd-shim-krun"
+version = "0.1.0"
+edition = "2021"
+description = "containerd v2 runtime shim for running hardware-isolated microVMs with libkrun"
+license = "Apache-2.0"
+
+[[bin]]
+name = "containerd-shim-krun-v2"
+path = "src/main.rs"
+
+[dependencies]
+microvm-core = { path = "../microvm-core" }
+krun-sys = { path = "../krun-sys" }
+
+containerd-shim = { workspace = true }
+containerd-shim-protos = { workspace = true }
+ttrpc = { workspace = true }
+oci-spec = { workspace = true }
+async-trait = { workspace = true }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }

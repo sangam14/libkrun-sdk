@@ -1,0 +1,25 @@
+[package]
+name = "krun-operator"
+version = "0.1.0"
+edition = "2021"
+description = "Kubernetes Operator for running hardware-isolated microVMs with libkrun using kube-rs"
+license = "Apache-2.0"
+
+[[bin]]
+name = "krun-operator"
+path = "src/main.rs"
+
+[dependencies]
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+schemars = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }

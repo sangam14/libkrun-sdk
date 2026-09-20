@@ -1,0 +1,40 @@
+[package]
+name = "microvm-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for pulling OCI images, managing CoW rootfs, and supervising microVMs"
+license = "Apache-2.0"
+
+[dependencies]
+krun-sys = { path = "../krun-sys" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+tempfile = { workspace = true }
+bytes = { workspace = true }
+oci-spec = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "run_alpine"
+path = "../../examples/run_alpine.rs"
+
+[[example]]
+name = "run_ai_sandbox"
+path = "../../examples/run_ai_sandbox.rs"
+
+[[example]]
+name = "run_mistral_inference"
+path = "../../examples/run_mistral_inference.rs"

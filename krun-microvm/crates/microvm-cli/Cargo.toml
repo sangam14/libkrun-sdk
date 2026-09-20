@@ -1,0 +1,22 @@
+[package]
+name = "microvm-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool to run OCI container images as microVMs using libkrun"
+license = "Apache-2.0"
+
+[[bin]]
+name = "microvm"
+path = "src/main.rs"
+
+[dependencies]
+microvm-core = { path = "../microvm-core" }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

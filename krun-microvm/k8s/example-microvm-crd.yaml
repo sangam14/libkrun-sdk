@@ -1,0 +1,24 @@
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: mistral-7b-inference
+  namespace: default
+spec:
+  image: ghcr.io/ericlbuehler/mistral.rs:cpu-latest
+  vcpus: 4
+  memory: 8Gi
+  port: 1234
+  cmd:
+    - "mistralrs-server"
+    - "--host"
+    - "0.0.0.0"
+    - "--port"
+    - "1234"
+    - "plain"
+    - "-m"
+    - "mistralai/Mistral-7B-Instruct-v0.2"
+    - "--isq"
+    - "Q4K"
+  env:
+    - name: RUST_LOG
+      value: "info"

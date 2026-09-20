@@ -1,0 +1,17 @@
+[package]
+name = "microvm-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Dedicated supervisor process that calls libkrun to run the microVM"
+license = "Apache-2.0"
+
+[[bin]]
+name = "microvm-runner"
+path = "src/main.rs"
+
+[dependencies]
+krun-sys = { path = "../krun-sys" }
+microvm-core = { path = "../microvm-core" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }

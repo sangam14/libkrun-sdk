@@ -1,0 +1,125 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: microvms.krun.io
+spec:
+  group: krun.io
+  names:
+    kind: MicroVm
+    plural: microvms
+    singular: microvm
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Status phase of the microVM
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: Name of backing pod
+      jsonPath: .status.podName
+      name: Pod
+      type: string
+    - description: IP address of microVM
+      jsonPath: .status.podIp
+      name: IP
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for MicroVmSpec via `CustomResource`
+        properties:
+          spec:
+            description: Custom Resource Definition for running hardware-isolated microVMs via libkrun
+            properties:
+              cmd:
+                description: Optional command arguments override
+                items:
+                  type: string
+                nullable: true
+                type: array
+              env:
+                description: Optional environment variable key-value pairs
+                items:
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                nullable: true
+                type: array
+              image:
+                description: OCI container image to run as a microVM (e.g. alpine:latest, ghcr.io/ericlbuehler/mistral.rs:cpu-latest)
+                type: string
+              memory:
+                default: 512Mi
+                description: Memory limit (e.g. "512Mi", "4Gi", "8Gi")
+                type: string
+              modelArtifact:
+                description: Optional decoupled OCI model artifact reference (e.g. ghcr.io/mistralai/mistral-7b:v0.3)
+                nullable: true
+                type: string
+              port:
+                description: Container port to expose
+                format: uint16
+                maximum: 65535.0
+                minimum: 0.0
+                nullable: true
+                type: integer
+              vcpus:
+                default: 2
+                description: Number of allocated virtual CPUs
+                format: uint8
+                maximum: 255.0
+                minimum: 0.0
+                type: integer
+              workspaceCow:
+                description: Host directory path to mount as an isolated CoW workspace
+                nullable: true
+                type: string
+            required:
+            - image
+            type: object
+          status:
+            nullable: true
+            properties:
+              message:
+                description: Human-readable message or error description
+                nullable: true
+                type: string
+              nodeName:
+                description: Host node running the microVM
+                nullable: true
+                type: string
+              phase:
+                description: 'Lifecycle phase: Pending, Running, Succeeded, Failed'
+                type: string
+              podIp:
+                description: Assigned Pod IP address
+                nullable: true
+                type: string
+              podName:
+                description: Backing Pod name managed by the operator
+                nullable: true
+                type: string
+              ready:
+                description: True if the microVM is healthy and accepting requests
+                type: boolean
+            required:
+            - phase
+            - ready
+            type: object
+        required:
+        - spec
+        title: MicroVm
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
