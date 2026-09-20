@@ -15,8 +15,34 @@ pub enum NetworkMode {
     Tsi,
     /// Virtio-net interface connected to an external user-space stream socket (e.g. gvproxy, passt, or CNI socket).
     UnixStream(PathBuf),
+    /// Virtio-net connected to a Kubernetes CNI network namespace (e.g., via passt/veth or netns socket).
+    Cni {
+        netns: PathBuf,
+        socket_path: Option<PathBuf>,
+    },
     /// Complete air-gapped isolation: no network interfaces, only loopback (lo).
     None,
+}
+
+impl NetworkMode {
+    pub fn is_cni(&self) -> bool {
+        matches!(self, Self::Cni { .. })
+    }
+
+    pub fn netns_path(&self) -> Option<&Path> {
+        match self {
+            Self::Cni { netns, .. } => Some(netns.as_path()),
+            _ => None,
+        }
+    }
+
+    pub fn unix_socket_path(&self) -> Option<&Path> {
+        match self {
+            Self::UnixStream(p) => Some(p.as_path()),
+            Self::Cni { socket_path, .. } => socket_path.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 pub struct DnsConfig;
@@ -147,5 +173,19 @@ mod tests {
 
         let hostname = fs::read_to_string(dir.path().join("etc/hostname")).unwrap();
         assert_eq!(hostname.trim(), "my-test-vm");
+    }
+
+    #[test]
+    fn test_network_mode_cni() {
+        let mode = NetworkMode::Cni {
+            netns: PathBuf::from("/proc/1234/ns/net"),
+            socket_path: Some(PathBuf::from("/run/cni-krun.sock")),
+        };
+        assert!(mode.is_cni());
+        assert_eq!(mode.netns_path(), Some(Path::new("/proc/1234/ns/net")));
+        assert_eq!(
+            mode.unix_socket_path(),
+            Some(Path::new("/run/cni-krun.sock"))
+        );
     }
 }

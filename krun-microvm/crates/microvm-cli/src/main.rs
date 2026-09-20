@@ -325,6 +325,34 @@ enum Commands {
         #[command(subcommand)]
         command: ArtifactCommands,
     },
+
+    /// Capture an instant Copy-on-Write snapshot of a microVM
+    Snapshot {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Output path for snapshot (directory or .tar archive)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Restore a microVM from a snapshot for instant warm-start
+    Restore {
+        /// Path to the snapshot package (directory or .tar archive)
+        snapshot: PathBuf,
+
+        /// Optional new microVM instance ID
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -461,6 +489,11 @@ async fn main() -> Result<()> {
                 builder = builder.network_mode(microvm_core::NetworkMode::UnixStream(
                     PathBuf::from(path_str),
                 ));
+            } else if let Some(netns_str) = net.strip_prefix("cni:") {
+                builder = builder.network_mode(microvm_core::NetworkMode::Cni {
+                    netns: PathBuf::from(netns_str),
+                    socket_path: None,
+                });
             } else {
                 builder = builder.network_mode(microvm_core::NetworkMode::Tsi);
             }
@@ -1262,6 +1295,43 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::Snapshot {
+            id,
+            output,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let out_path =
+                output.unwrap_or_else(|| base.join("snapshots").join(format!("{}.tar", id)));
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let manifest = StateManager::snapshot(&base, &id, &out_path)?;
+            println!("📸 Snapshot created successfully!");
+            println!("   Target: {}", out_path.display());
+            println!(
+                "   Origin: {} (Image: {})",
+                manifest.original_id, manifest.image
+            );
+        }
+
+        Commands::Restore {
+            snapshot,
+            name,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let restored = StateManager::restore(&base, &snapshot, name.as_deref())?;
+            println!("⚡ MicroVM restored successfully from snapshot!");
+            println!("   ID:     {}", restored.id);
+            println!("   Image:  {}", restored.image);
+            println!("   Rootfs: {}", restored.rootfs_path().display());
+            println!(
+                "💡 Run 'microvm run --bundle {}' or use with runner to boot.",
+                restored.instance_dir.display()
+            );
+        }
     }
 
     Ok(())
@@ -1554,6 +1624,41 @@ mod tests {
                 assert_eq!(cmd, vec!["uname", "-a"]);
             }
             _ => panic!("Expected Commands::Exec"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_snapshot_and_restore() {
+        let snap_args = vec![
+            "microvm",
+            "snapshot",
+            "vm-12345",
+            "--output",
+            "/tmp/snap.tar",
+        ];
+        let cli = Cli::try_parse_from(snap_args).unwrap();
+        match cli.command {
+            Commands::Snapshot { id, output, .. } => {
+                assert_eq!(id, "vm-12345");
+                assert_eq!(output, Some(PathBuf::from("/tmp/snap.tar")));
+            }
+            _ => panic!("Expected Commands::Snapshot"),
+        }
+
+        let restore_args = vec![
+            "microvm",
+            "restore",
+            "/tmp/snap.tar",
+            "--name",
+            "vm-restored-99",
+        ];
+        let cli = Cli::try_parse_from(restore_args).unwrap();
+        match cli.command {
+            Commands::Restore { snapshot, name, .. } => {
+                assert_eq!(snapshot, PathBuf::from("/tmp/snap.tar"));
+                assert_eq!(name.as_deref(), Some("vm-restored-99"));
+            }
+            _ => panic!("Expected Commands::Restore"),
         }
     }
 }

@@ -15,12 +15,12 @@ pub use acceleration::{AccelerationFormat, ImageAcceleration};
 pub use bundle::OciBundle;
 
 pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
-pub use exec::{exec_in_microvm, ExecRequest, ExecResponse};
+pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};
 pub use metrics::{collect_process_stats, ProcessStats};
 pub use net::{DnsConfig, NetworkMode};
 pub use oci::{ArtifactMetadata, ImageReference, OciArtifact, OciClient, OciLayout};
 pub use preflight::{CheckResult, Preflight};
 pub use rootfs::clone_rootfs;
-pub use state::{StateManager, VmState, VmStatus};
+pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
 pub use types::{PortForward, RunnerConfig, VirtioFsMount, VsockPort};
 pub use vm::{MicroVm, MicroVmBuilder};

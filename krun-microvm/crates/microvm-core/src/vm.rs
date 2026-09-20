@@ -163,6 +163,12 @@ impl MicroVmBuilder {
         if let Some(lim) = bundle.rlimits {
             builder = builder.rlimits(lim);
         }
+        if let Some(netns) = bundle.netns_path {
+            builder = builder.network_mode(crate::net::NetworkMode::Cni {
+                netns,
+                socket_path: None,
+            });
+        }
         builder.rootfs_override = Some(bundle.rootfs_path);
         builder.bundle_dir = Some(bundle.bundle_dir);
         Ok(builder)
@@ -428,6 +434,17 @@ impl MicroVmBuilder {
             crate::net::NetworkMode::UnixStream(path) => {
                 self.no_network = false;
                 self.net_sock_path = Some(path.to_string_lossy().to_string());
+            }
+            crate::net::NetworkMode::Cni { netns, socket_path } => {
+                self.no_network = false;
+                if let Some(sock) = socket_path {
+                    self.net_sock_path = Some(sock.to_string_lossy().to_string());
+                } else {
+                    let default_sock = netns.parent().unwrap_or(netns).join("cni-krun.sock");
+                    if default_sock.exists() {
+                        self.net_sock_path = Some(default_sock.to_string_lossy().to_string());
+                    }
+                }
             }
             crate::net::NetworkMode::Tsi => {
                 self.no_network = false;

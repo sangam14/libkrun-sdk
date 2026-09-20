@@ -64,10 +64,26 @@ struct TaskInstance {
     stream_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct ExecInstance {
+    task_id: String,
+    exec_id: String,
+    stdin: String,
+    stdout: String,
+    stderr: String,
+    terminal: bool,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    workdir: Option<String>,
+    status: Status,
+    exit_status: Option<u32>,
+    exited_at: Option<Timestamp>,
+}
+
 #[derive(Clone)]
 pub struct KrunTask {
     exit: Arc<ExitSignal>,
     instances: Arc<Mutex<HashMap<String, TaskInstance>>>,
+    exec_instances: Arc<Mutex<HashMap<String, ExecInstance>>>,
 }
 
 impl KrunTask {
@@ -75,6 +91,7 @@ impl KrunTask {
         Self {
             exit,
             instances: Arc::new(Mutex::new(HashMap::new())),
+            exec_instances: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -143,6 +160,61 @@ impl Task for KrunTask {
     }
 
     async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> ttrpc::Result<StartResponse> {
+        let req_id = req.id();
+        {
+            let mut execs = self.exec_instances.lock().await;
+            if let Some(exec_inst) = execs.get_mut(req_id) {
+                let instances = self.instances.lock().await;
+                let parent = instances.get(&exec_inst.task_id).ok_or_else(|| {
+                    ttrpc::Error::RpcStatus(ttrpc::get_status(
+                        ttrpc::Code::NOT_FOUND,
+                        format!("parent task {} not found", exec_inst.task_id),
+                    ))
+                })?;
+
+                let rootfs = parent.bundle.join("rootfs");
+                let mut exec_req = microvm_core::ExecRequest::new(exec_inst.cmd.clone())
+                    .with_env(exec_inst.env.clone())
+                    .with_tty(exec_inst.terminal);
+                if let Some(ref w) = exec_inst.workdir {
+                    exec_req = exec_req.with_workdir(w.clone());
+                }
+
+                let stdout_fifo = exec_inst.stdout.clone();
+                let stderr_fifo = exec_inst.stderr.clone();
+
+                let exec_res = microvm_core::exec_in_guest_rootfs(&rootfs, &exec_req).await;
+                let (code, out, err) = match exec_res {
+                    Ok(resp) => (resp.exit_code as u32, resp.stdout, resp.stderr),
+                    Err(e) => (126, String::new(), e.to_string()),
+                };
+
+                if !stdout_fifo.is_empty() && !out.is_empty() {
+                    let _ = tokio::fs::write(&stdout_fifo, out.as_bytes()).await;
+                }
+                if !stderr_fifo.is_empty() && !err.is_empty() {
+                    let _ = tokio::fs::write(&stderr_fifo, err.as_bytes()).await;
+                }
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let exited_at = Timestamp {
+                    seconds: now.as_secs() as i64,
+                    nanos: now.subsec_nanos() as i32,
+                    ..Default::default()
+                };
+
+                exec_inst.status = Status::STOPPED;
+                exec_inst.exit_status = Some(code);
+                exec_inst.exited_at = Some(exited_at);
+
+                let mut resp = StartResponse::new();
+                resp.set_pid(std::process::id());
+                return Ok(resp);
+            }
+        }
+
         let mut instances = self.instances.lock().await;
         let instance = instances.get_mut(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -158,6 +230,28 @@ impl Task for KrunTask {
     }
 
     async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> ttrpc::Result<StateResponse> {
+        let req_id = req.id();
+        {
+            let execs = self.exec_instances.lock().await;
+            if let Some(exec_inst) = execs.get(req_id) {
+                let mut resp = StateResponse::new();
+                resp.set_id(exec_inst.exec_id.clone());
+                resp.set_pid(std::process::id());
+                resp.set_status(exec_inst.status);
+                resp.set_stdin(exec_inst.stdin.clone());
+                resp.set_stdout(exec_inst.stdout.clone());
+                resp.set_stderr(exec_inst.stderr.clone());
+                resp.set_terminal(exec_inst.terminal);
+                if let Some(code) = exec_inst.exit_status {
+                    resp.set_exit_status(code);
+                }
+                if let Some(ref ts) = exec_inst.exited_at {
+                    resp.set_exited_at(ts.clone());
+                }
+                return Ok(resp);
+            }
+        }
+
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -210,6 +304,19 @@ impl Task for KrunTask {
     }
 
     async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> ttrpc::Result<WaitResponse> {
+        let req_id = req.id();
+        {
+            let execs = self.exec_instances.lock().await;
+            if let Some(exec_inst) = execs.get(req_id) {
+                let code = exec_inst.exit_status.unwrap_or(0);
+                let exited_at = exec_inst.exited_at.clone().unwrap_or_default();
+                let mut resp = WaitResponse::new();
+                resp.set_exit_status(code);
+                resp.set_exited_at(exited_at);
+                return Ok(resp);
+            }
+        }
+
         let (vm_opt, pid) = {
             let instances = self.instances.lock().await;
             let inst = instances.get(req.id()).ok_or_else(|| {
@@ -261,6 +368,17 @@ impl Task for KrunTask {
         _ctx: &TtrpcContext,
         req: DeleteRequest,
     ) -> ttrpc::Result<DeleteResponse> {
+        let req_id = req.id();
+        {
+            let mut execs = self.exec_instances.lock().await;
+            if let Some(exec_inst) = execs.remove(req_id) {
+                let mut resp = DeleteResponse::new();
+                resp.set_pid(std::process::id());
+                resp.set_exit_status(exec_inst.exit_status.unwrap_or(0));
+                return Ok(resp);
+            }
+        }
+
         let mut instances = self.instances.lock().await;
         let instance = instances.remove(req.id());
 
@@ -325,10 +443,106 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    async fn pause(&self, _ctx: &TtrpcContext, req: PauseRequest) -> ttrpc::Result<Empty> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances.get_mut(req.id()).ok_or_else(|| {
+            ttrpc::Error::RpcStatus(ttrpc::get_status(
+                ttrpc::Code::NOT_FOUND,
+                format!("task {} not found", req.id()),
+            ))
+        })?;
+
+        if instance.pid > 0 {
+            let _ = signal::kill(Pid::from_raw(instance.pid as i32), Signal::SIGSTOP);
+        }
+        instance.status = Status::PAUSED;
+        Ok(Empty::new())
+    }
+
+    async fn resume(&self, _ctx: &TtrpcContext, req: ResumeRequest) -> ttrpc::Result<Empty> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances.get_mut(req.id()).ok_or_else(|| {
+            ttrpc::Error::RpcStatus(ttrpc::get_status(
+                ttrpc::Code::NOT_FOUND,
+                format!("task {} not found", req.id()),
+            ))
+        })?;
+
+        if instance.pid > 0 {
+            let _ = signal::kill(Pid::from_raw(instance.pid as i32), Signal::SIGCONT);
+        }
+        instance.status = Status::RUNNING;
+        Ok(Empty::new())
+    }
+
+    async fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> ttrpc::Result<Empty> {
+        let instances = self.instances.lock().await;
+        if !instances.contains_key(req.id()) {
+            return Err(ttrpc::Error::RpcStatus(ttrpc::get_status(
+                ttrpc::Code::NOT_FOUND,
+                format!("task {} not found", req.id()),
+            )));
+        }
+
+        let (cmd, env, workdir) = parse_process_spec(&req.spec);
+        let exec_inst = ExecInstance {
+            task_id: req.id().to_string(),
+            exec_id: req.exec_id().to_string(),
+            stdin: req.stdin().to_string(),
+            stdout: req.stdout().to_string(),
+            stderr: req.stderr().to_string(),
+            terminal: req.terminal(),
+            cmd: if cmd.is_empty() {
+                vec!["/bin/sh".to_string()]
+            } else {
+                cmd
+            },
+            env,
+            workdir,
+            status: Status::CREATED,
+            exit_status: None,
+            exited_at: None,
+        };
+
+        self.exec_instances
+            .lock()
+            .await
+            .insert(req.exec_id().to_string(), exec_inst);
+        Ok(Empty::new())
+    }
+
+    async fn update(&self, _ctx: &TtrpcContext, req: UpdateTaskRequest) -> ttrpc::Result<Empty> {
+        let instances = self.instances.lock().await;
+        if !instances.contains_key(req.id()) {
+            return Err(ttrpc::Error::RpcStatus(ttrpc::get_status(
+                ttrpc::Code::NOT_FOUND,
+                format!("task {} not found", req.id()),
+            )));
+        }
+        Ok(Empty::new())
+    }
+
     async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> ttrpc::Result<Empty> {
         self.exit.signal();
         Ok(Empty::new())
     }
+}
+
+fn parse_process_spec(
+    spec: &containerd_shim_protos::protobuf::MessageField<
+        containerd_shim_protos::protobuf::well_known_types::any::Any,
+    >,
+) -> (Vec<String>, Vec<String>, Option<String>) {
+    if let Some(a) = spec.as_ref() {
+        if let Ok(proc) = serde_json::from_slice::<oci_spec::runtime::Process>(&a.value) {
+            let cmd = proc.args().clone().unwrap_or_default();
+            let env = proc.env().clone().unwrap_or_default();
+            let cwd = proc.cwd().to_string_lossy().to_string();
+            let workdir = if cwd.is_empty() { None } else { Some(cwd) };
+            return (cmd, env, workdir);
+        }
+    }
+    (Vec::new(), Vec::new(), None)
 }
 
 async fn stream_console_to_fifos(
@@ -440,4 +654,165 @@ async fn stream_console_to_fifos(
     }
 
     tracing::debug!("FIFO streamer finished for PID {}", pid);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_parse_process_spec() {
+        let proc = oci_spec::runtime::ProcessBuilder::default()
+            .args(vec!["/bin/echo".to_string(), "hello".to_string()])
+            .env(vec!["FOO=BAR".to_string()])
+            .cwd(PathBuf::from("/tmp"))
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_vec(&proc).unwrap();
+        let any = containerd_shim_protos::protobuf::well_known_types::any::Any {
+            type_url: "types.containerd.io/opencontainers/runtime-spec/1/Process".to_string(),
+            value: json,
+            ..Default::default()
+        };
+        let field = containerd_shim_protos::protobuf::MessageField::some(any);
+        let (cmd, env, workdir) = parse_process_spec(&field);
+        assert_eq!(cmd, vec!["/bin/echo", "hello"]);
+        assert_eq!(env, vec!["FOO=BAR"]);
+        assert_eq!(workdir.as_deref(), Some("/tmp"));
+    }
+
+    #[tokio::test]
+    async fn test_task_pause_resume_lifecycle() {
+        let task = KrunTask::new(Arc::new(ExitSignal::default()));
+        let dummy_inst = TaskInstance {
+            id: "task-1".to_string(),
+            pid: 0,
+            bundle: PathBuf::from("/tmp/bundle"),
+            stdin: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            terminal: false,
+            status: Status::RUNNING,
+            exit_status: None,
+            exited_at: None,
+            vm: None,
+            stream_handle: None,
+        };
+        task.instances
+            .lock()
+            .await
+            .insert("task-1".to_string(), dummy_inst);
+
+        let ctx = TtrpcContext {
+            timeout_nano: 0,
+            mh: containerd_shim_protos::ttrpc::MessageHeader::default(),
+            metadata: HashMap::new(),
+        };
+
+        // Pause
+        let mut pause_req = PauseRequest::new();
+        pause_req.set_id("task-1".to_string());
+        task.pause(&ctx, pause_req).await.unwrap();
+
+        {
+            let instances = task.instances.lock().await;
+            assert_eq!(instances.get("task-1").unwrap().status, Status::PAUSED);
+        }
+
+        // Resume
+        let mut resume_req = ResumeRequest::new();
+        resume_req.set_id("task-1".to_string());
+        task.resume(&ctx, resume_req).await.unwrap();
+
+        {
+            let instances = task.instances.lock().await;
+            assert_eq!(instances.get("task-1").unwrap().status, Status::RUNNING);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_exec_registration_state_delete() {
+        let task = KrunTask::new(Arc::new(ExitSignal::default()));
+        let dummy_inst = TaskInstance {
+            id: "task-1".to_string(),
+            pid: 0,
+            bundle: PathBuf::from("/tmp/bundle"),
+            stdin: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            terminal: false,
+            status: Status::RUNNING,
+            exit_status: None,
+            exited_at: None,
+            vm: None,
+            stream_handle: None,
+        };
+        task.instances
+            .lock()
+            .await
+            .insert("task-1".to_string(), dummy_inst);
+
+        let ctx = TtrpcContext {
+            timeout_nano: 0,
+            mh: containerd_shim_protos::ttrpc::MessageHeader::default(),
+            metadata: HashMap::new(),
+        };
+
+        // Register exec
+        let mut exec_req = ExecProcessRequest::new();
+        exec_req.set_id("task-1".to_string());
+        exec_req.set_exec_id("exec-100".to_string());
+        task.exec(&ctx, exec_req).await.unwrap();
+
+        // State query for exec process
+        let mut state_req = StateRequest::new();
+        state_req.set_id("exec-100".to_string());
+        let state_resp = task.state(&ctx, state_req).await.unwrap();
+        assert_eq!(state_resp.id(), "exec-100");
+        assert_eq!(state_resp.status(), Status::CREATED);
+
+        // Delete exec process
+        let mut del_req = DeleteRequest::new();
+        del_req.set_id("exec-100".to_string());
+        let del_resp = task.delete(&ctx, del_req).await.unwrap();
+        assert_eq!(del_resp.exit_status(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_task_update() {
+        let task = KrunTask::new(Arc::new(ExitSignal::default()));
+        let dummy_inst = TaskInstance {
+            id: "task-1".to_string(),
+            pid: 0,
+            bundle: PathBuf::from("/tmp/bundle"),
+            stdin: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            terminal: false,
+            status: Status::RUNNING,
+            exit_status: None,
+            exited_at: None,
+            vm: None,
+            stream_handle: None,
+        };
+        task.instances
+            .lock()
+            .await
+            .insert("task-1".to_string(), dummy_inst);
+
+        let ctx = TtrpcContext {
+            timeout_nano: 0,
+            mh: containerd_shim_protos::ttrpc::MessageHeader::default(),
+            metadata: HashMap::new(),
+        };
+
+        let mut upd_req = UpdateTaskRequest::new();
+        upd_req.set_id("task-1".to_string());
+        assert!(task.update(&ctx, upd_req).await.is_ok());
+
+        let mut not_found_req = UpdateTaskRequest::new();
+        not_found_req.set_id("non-existent".to_string());
+        assert!(task.update(&ctx, not_found_req).await.is_err());
+    }
 }

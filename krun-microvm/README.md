@@ -492,8 +492,22 @@ Execute commands directly inside an active, running microVM without restarting t
 ### 26. Enterprise Multi-Architecture CI/CD Pipeline
 Continuous integration powered by GitHub Actions across:
 - **macOS 14 (Apple Silicon arm64)**: Native Metal acceleration, Hypervisor.framework tests.
-- **Ubuntu Latest (x86_64 Linux)**: KVM virtualization, automated linting, test suite, and release packaging.
-- **Zero-Warning Guarantee**: Enforced `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
+### 27. MicroVM Live Snapshot & Warm-Start Restore (`microvm snapshot`, `microvm restore`)
+Capture instant filesystem and state snapshots of running or stopped microVMs using kernel-level Copy-on-Write (APFS `clonefile` / Linux `reflink`), and restore them in single-digit milliseconds:
+```bash
+# Snapshot a microVM into a portable archive:
+./target/release/microvm snapshot <vm-id> --output /tmp/my-snapshot.tar
+
+# Restore snapshot into a new warm-started microVM instance:
+./target/release/microvm restore /tmp/my-snapshot.tar --name worker-warm-01
+```
+
+### 28. Kubernetes CNI Network Integration (`--net cni:<netns>`)
+Connect microVMs directly into Kubernetes CNI network namespaces (Flannel, Calico, Cilium, Bridge) with dedicated cluster IP addresses:
+```bash
+# Run microVM attached to a Pod network namespace:
+./target/release/microvm run --net cni:/proc/1234/ns/net alpine:latest -- ip addr
+```
 
 ---
 
@@ -505,9 +519,13 @@ Continuous integration powered by GitHub Actions across:
 
 ### Production Kubernetes Features:
 - **Dynamic Resource Auto-Sizing**: Automatically extracts `resources.cpu` (quota/period) and `resources.memory.limit` from Pod specifications and provisions corresponding vCPUs and RAM.
+- **Kubernetes CNI Network Integration**: Automatically extracts `netns_path` from PodSandbox specifications to connect microVMs to cluster networks.
+- **In-Guest Command Exec (`kubectl exec` / `crictl exec`)**: Directly execute diagnostics and interactive shells inside active microVM Pods via `Task::exec`.
+- **In-Place Lifecycle Controls (`Task::pause`, `Task::resume`)**: Freeze and thaw microVM workloads on demand without terminating them.
 - **Projected Volume & Single-File Mounts**: Differentiates between directories (mounted seamlessly via VirtioFS) and individual files (Kubernetes `ConfigMap`s, `Secret`s, and service account tokens), injecting files directly into `instance_rootfs`.
 - **Real-Time Stdio FIFO Streaming**: Streams console logs into containerd named pipes (`req.stdout()`, `req.stderr()`) in real time, making `kubectl logs -f` and `crictl logs` work natively.
 - **Accurate Process Lifecycle & Exited-At Timestamps**: Fully compliant with containerd TTRPC task APIs, returning exit status and nano-precision timestamps upon completion.
+- **Automated CRI Conformance Test Suite**: Run `bash k8s/conformance/test_cri_conformance.sh` to validate CRI compatibility against live containerd.
 
 ### Quick Setup
 

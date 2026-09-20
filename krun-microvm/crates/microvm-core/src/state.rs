@@ -398,6 +398,162 @@ impl StateManager {
 
         crate::exec::exec_in_microvm(&vm.exec_socket_path(), &vm.rootfs_path(), req).await
     }
+
+    /// Captures a live or stopped microVM's state, configuration, and instance rootfs into a snapshot package.
+    pub fn snapshot(
+        data_dir: &Path,
+        id_or_pid: &str,
+        output_path: &Path,
+    ) -> Result<SnapshotManifest> {
+        let vm = match Self::find(data_dir, id_or_pid)? {
+            Some(v) => v,
+            None => bail!("MicroVM with ID or PID '{}' not found", id_or_pid),
+        };
+
+        let rootfs = vm.rootfs_path();
+        if !rootfs.exists() {
+            bail!("MicroVM rootfs path does not exist at {}", rootfs.display());
+        }
+
+        let config_file = vm.instance_dir.join(".krun_config.json");
+        let runner_config = if config_file.exists() {
+            let data = fs::read_to_string(&config_file)?;
+            serde_json::from_str::<crate::types::RunnerConfig>(&data).ok()
+        } else {
+            None
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let manifest = SnapshotManifest {
+            version: 1,
+            original_id: vm.id.clone(),
+            image: vm.image.clone(),
+            created_at: now,
+            port_forwards: vm.port_forwards.clone(),
+            runner_config,
+        };
+
+        if output_path
+            .extension()
+            .is_some_and(|e| e == "tar" || e == "gz")
+        {
+            let tar_file = fs::File::create(output_path)?;
+            let mut tar_builder = tar::Builder::new(tar_file);
+
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest_bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar_builder.append_data(&mut header, "snapshot.json", &manifest_bytes[..])?;
+            tar_builder.append_dir_all("rootfs", &rootfs)?;
+            tar_builder.finish()?;
+        } else {
+            fs::create_dir_all(output_path)?;
+            let manifest_path = output_path.join("snapshot.json");
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+            fs::write(manifest_path, manifest_bytes)?;
+
+            let target_rootfs = output_path.join("rootfs");
+            crate::rootfs::clone_rootfs(&rootfs, &target_rootfs)?;
+        }
+
+        Ok(manifest)
+    }
+
+    /// Restores a snapshot into a new microVM instance ready for immediate execution.
+    pub fn restore(data_dir: &Path, snapshot_path: &Path, new_id: Option<&str>) -> Result<VmState> {
+        if !snapshot_path.exists() {
+            bail!("Snapshot path '{}' does not exist", snapshot_path.display());
+        }
+
+        let gen_id = format!(
+            "vm-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let target_id = new_id.unwrap_or(&gen_id);
+        let instances_dir = data_dir.join("instances").join(target_id);
+        fs::create_dir_all(&instances_dir)?;
+
+        let target_rootfs = instances_dir.join("rootfs");
+
+        let manifest: SnapshotManifest = if snapshot_path.is_file() {
+            let file = fs::File::open(snapshot_path)?;
+            let mut archive = tar::Archive::new(file);
+            let mut found_manifest = None;
+
+            for entry_res in archive.entries()? {
+                let mut entry = entry_res?;
+                let path = entry.path()?.to_path_buf();
+                if path == Path::new("snapshot.json") {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut entry, &mut s)?;
+                    found_manifest = serde_json::from_str::<SnapshotManifest>(&s).ok();
+                } else if path.starts_with("rootfs") {
+                    let rel = path.strip_prefix("rootfs")?;
+                    let dest = target_rootfs.join(rel);
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    entry.unpack(&dest)?;
+                }
+            }
+
+            found_manifest.ok_or_else(|| anyhow::anyhow!("snapshot.json not found in archive"))?
+        } else {
+            let manifest_path = snapshot_path.join("snapshot.json");
+            if !manifest_path.exists() {
+                bail!("snapshot.json not found in {}", snapshot_path.display());
+            }
+            let data = fs::read_to_string(manifest_path)?;
+            let m: SnapshotManifest = serde_json::from_str(&data)?;
+
+            let src_rootfs = snapshot_path.join("rootfs");
+            if src_rootfs.exists() {
+                crate::rootfs::clone_rootfs(&src_rootfs, &target_rootfs)?;
+            }
+            m
+        };
+
+        if let Some(ref cfg) = manifest.runner_config {
+            let cfg_path = instances_dir.join(".krun_config.json");
+            let json = serde_json::to_string_pretty(cfg)?;
+            fs::write(cfg_path, json)?;
+        }
+
+        let new_state = VmState {
+            id: target_id.to_string(),
+            pid: 0,
+            image: manifest.image,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            port_forwards: manifest.port_forwards,
+            instance_dir: instances_dir,
+            status: VmStatus::Stopped,
+        };
+
+        Self::save(data_dir, &new_state)?;
+        Ok(new_state)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotManifest {
+    pub version: u32,
+    pub original_id: String,
+    pub image: String,
+    pub created_at: u64,
+    pub port_forwards: Vec<PortForward>,
+    pub runner_config: Option<crate::types::RunnerConfig>,
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
@@ -560,5 +716,75 @@ mod tests {
         let resume_res = StateManager::resume(dir.path(), "vm-pause-test");
         assert!(resume_res.is_err());
         assert!(resume_res.unwrap_err().to_string().contains("not running"));
+    }
+
+    #[test]
+    fn test_snapshot_and_restore_directory() {
+        let dir = tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/vm-snap-1");
+        let rootfs = instance_dir.join("rootfs");
+        fs::create_dir_all(rootfs.join("etc")).unwrap();
+        fs::write(rootfs.join("etc/version.txt"), "1.0.0-snapshot").unwrap();
+
+        let vm = VmState {
+            id: "vm-snap-1".to_string(),
+            pid: 0,
+            image: "ubuntu:22.04".to_string(),
+            created_at: 100,
+            port_forwards: vec![PortForward {
+                host: 8080,
+                guest: 80,
+            }],
+            instance_dir,
+            status: VmStatus::Stopped,
+        };
+        StateManager::save(dir.path(), &vm).unwrap();
+
+        let snap_dir = dir.path().join("snapshots/snap-1");
+        let manifest = StateManager::snapshot(dir.path(), "vm-snap-1", &snap_dir).unwrap();
+        assert_eq!(manifest.original_id, "vm-snap-1");
+        assert_eq!(manifest.image, "ubuntu:22.04");
+
+        // Restore into new instance
+        let restored = StateManager::restore(dir.path(), &snap_dir, Some("vm-restored-1")).unwrap();
+        assert_eq!(restored.id, "vm-restored-1");
+        assert_eq!(restored.image, "ubuntu:22.04");
+        assert_eq!(restored.port_forwards.len(), 1);
+
+        let restored_ver =
+            fs::read_to_string(restored.instance_dir.join("rootfs/etc/version.txt")).unwrap();
+        assert_eq!(restored_ver, "1.0.0-snapshot");
+    }
+
+    #[test]
+    fn test_snapshot_and_restore_tar() {
+        let dir = tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/vm-snap-tar");
+        let rootfs = instance_dir.join("rootfs");
+        fs::create_dir_all(rootfs.join("app")).unwrap();
+        fs::write(rootfs.join("app/data.json"), r#"{"model":"mistral"}"#).unwrap();
+
+        let vm = VmState {
+            id: "vm-snap-tar".to_string(),
+            pid: 0,
+            image: "mistral:latest".to_string(),
+            created_at: 200,
+            port_forwards: vec![],
+            instance_dir,
+            status: VmStatus::Stopped,
+        };
+        StateManager::save(dir.path(), &vm).unwrap();
+
+        let tar_path = dir.path().join("snapshots/vm-snap-tar.tar");
+        fs::create_dir_all(tar_path.parent().unwrap()).unwrap();
+        let manifest = StateManager::snapshot(dir.path(), "vm-snap-tar", &tar_path).unwrap();
+        assert_eq!(manifest.original_id, "vm-snap-tar");
+
+        // Restore from tar
+        let restored =
+            StateManager::restore(dir.path(), &tar_path, Some("vm-tar-restored")).unwrap();
+        assert_eq!(restored.id, "vm-tar-restored");
+        let data = fs::read_to_string(restored.instance_dir.join("rootfs/app/data.json")).unwrap();
+        assert_eq!(data, r#"{"model":"mistral"}"#);
     }
 }
