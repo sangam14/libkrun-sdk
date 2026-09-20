@@ -21,6 +21,8 @@ pub struct VirtioFsMount {
     pub path: PathBuf,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub dax_window_size_bytes: Option<u64>,
 }
 
 impl VirtioFsMount {
@@ -29,7 +31,13 @@ impl VirtioFsMount {
             tag: tag.into(),
             path: path.into(),
             read_only,
+            dax_window_size_bytes: None,
         }
+    }
+
+    pub fn with_dax(mut self, bytes: u64) -> Self {
+        self.dax_window_size_bytes = Some(bytes);
+        self
     }
 }
 
@@ -77,4 +85,6 @@ pub struct RunnerConfig {
     pub rlimits: Option<String>,
     #[serde(default)]
     pub detach: bool,
+    #[serde(default)]
+    pub dax_window_size_bytes: Option<u64>,
 }

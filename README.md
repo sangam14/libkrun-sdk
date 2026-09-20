@@ -285,8 +285,12 @@ Inspect supervisor process and thread statistics (`top`):
 microvm top <vm-id>
 ```
 
-Stop and remove microVM instances (`stop`, `rm`, `prune`):
-```bash
+# Pause / freeze all vCPUs of an active microVM:
+microvm pause <vm-id>
+
+# Resume a paused microVM:
+microvm resume <vm-id>
+
 # Gracefully stop an active microVM:
 microvm stop <vm-id>
 
@@ -347,6 +351,16 @@ microvm run \
     alpine:latest -- sh -c "echo '# Mutated by agent' >> main.py && cat main.py"
 
 # Verify host ./my-ai-repo/main.py remains completely unaltered!
+```
+
+### 20. VirtioFS DAX Shared Memory Window for Zero-Copy AI Models (`--dax <size>`)
+Enables Direct Access (DAX) shared memory window on VirtioFS, allowing multi-gigabyte files (such as AI model weights or databases) to be memory-mapped directly into the guest physical address space without copying through the guest page cache:
+```bash
+# Launch with a 4 GB DAX shared memory window for zero-copy model loading:
+microvm run \
+    --dax 4G \
+    --artifact ghcr.io/mistralai/mistral-7b:v0.3:models:ro \
+    ghcr.io/ericlbuehler/mistral.rs:cpu-latest
 ```
 
 ---

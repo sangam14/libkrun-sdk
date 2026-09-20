@@ -83,6 +83,14 @@ spec:
                 description: Host directory path to mount as an isolated CoW workspace
                 nullable: true
                 type: string
+              paused:
+                description: Declarative pause state; if true, freezes all microVM vCPUs
+                nullable: true
+                type: boolean
+              daxWindowSize:
+                description: VirtioFS DAX shared memory window size (e.g. "4Gi", "512Mi")
+                nullable: true
+                type: string
             required:
             - image
             type: object

@@ -88,6 +88,14 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                 })]
             });
 
+            let mut annotations = serde_json::Map::new();
+            if let Some(ref dax) = vm.spec.dax_window_size {
+                annotations.insert("krun.io/dax-window-size".to_string(), serde_json::Value::String(dax.clone()));
+            }
+            if let Some(ref model) = vm.spec.model_artifact {
+                annotations.insert("krun.io/model-artifact".to_string(), serde_json::Value::String(model.clone()));
+            }
+
             let pod_manifest: Pod = serde_json::from_value(serde_json::json!({
                 "apiVersion": "v1",
                 "kind": "Pod",
@@ -98,6 +106,7 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                         "app.kubernetes.io/name": "krun-microvm",
                         "krun.io/microvm": name,
                     },
+                    "annotations": annotations,
                     "ownerReferences": [{
                         "apiVersion": "krun.io/v1alpha1",
                         "kind": "MicroVm",
@@ -150,18 +159,25 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
         Some(pod) => {
             // 4. Sync Pod status into MicroVmStatus
             let pod_status = pod.status.as_ref();
-            let phase = pod_status
-                .and_then(|s| s.phase.clone())
-                .unwrap_or_else(|| "Pending".to_string());
-            let pod_ip = pod_status.and_then(|s| s.pod_ip.clone());
-            let node_name = pod.spec.as_ref().and_then(|s| s.node_name.clone());
-
             let ready = pod_status
                 .and_then(|s| s.container_statuses.as_ref())
                 .map(|cs| cs.iter().all(|c| c.ready))
                 .unwrap_or(false);
 
-            let message = if ready {
+            let is_paused = vm.spec.paused.unwrap_or(false);
+            let phase = if is_paused && ready {
+                "Paused".to_string()
+            } else {
+                pod_status
+                    .and_then(|s| s.phase.clone())
+                    .unwrap_or_else(|| "Pending".to_string())
+            };
+            let pod_ip = pod_status.and_then(|s| s.pod_ip.clone());
+            let node_name = pod.spec.as_ref().and_then(|s| s.node_name.clone());
+
+            let message = if is_paused && ready {
+                Some("MicroVM vCPUs are paused (declarative spec.paused: true)".to_string())
+            } else if ready {
                 Some("Hardware-isolated microVM is running and ready".to_string())
             } else {
                 pod_status.and_then(|s| s.message.clone())

@@ -79,6 +79,35 @@ impl OciConfig {
     }
 }
 
+/// Parses a human-readable size string (e.g. "4G", "512M", "1024K", "1048576") into bytes.
+pub fn parse_size_to_bytes(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("Size string cannot be empty");
+    }
+
+    let (num_str, unit) = match s.find(|c: char| c.is_alphabetic()) {
+        Some(idx) => (&s[..idx], &s[idx..]),
+        None => (s, ""),
+    };
+
+    let num: f64 = num_str
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid numeric size: '{}'", num_str))?;
+
+    let multiplier = match unit.to_uppercase().as_str() {
+        "" | "B" => 1u64,
+        "K" | "KB" | "KIB" => 1024u64,
+        "M" | "MB" | "MIB" => 1024 * 1024u64,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024u64,
+        "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024u64,
+        other => anyhow::bail!("Unknown size unit: '{}'", other),
+    };
+
+    Ok((num * multiplier as f64) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +146,16 @@ mod tests {
         let override_cmd = vec!["/bin/bash".to_string(), "-c".to_string(), "ls".to_string()];
         let cmd = oci.resolve_cmd(Some(override_cmd.clone()));
         assert_eq!(cmd, override_cmd);
+    }
+
+    #[test]
+    fn test_parse_size_to_bytes() {
+        assert_eq!(parse_size_to_bytes("4G").unwrap(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_to_bytes("512M").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_size_to_bytes("1024K").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_to_bytes("2048").unwrap(), 2048);
+        assert_eq!(parse_size_to_bytes("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert!(parse_size_to_bytes("").is_err());
+        assert!(parse_size_to_bytes("invalid").is_err());
     }
 }

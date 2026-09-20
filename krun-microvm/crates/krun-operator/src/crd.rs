@@ -45,6 +45,14 @@ pub struct MicroVmSpec {
     /// Host directory path to mount as an isolated CoW workspace
     #[serde(rename = "workspaceCow")]
     pub workspace_cow: Option<String>,
+
+    /// Declarative pause state: if true, pauses/freezes all microVM vCPUs
+    #[serde(default)]
+    pub paused: Option<bool>,
+
+    /// VirtioFS DAX shared memory window size (e.g. "4Gi", "512Mi")
+    #[serde(rename = "daxWindowSize", default)]
+    pub dax_window_size: Option<String>,
 }
 
 fn default_vcpus() -> u8 {

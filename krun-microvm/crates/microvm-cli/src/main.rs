@@ -103,6 +103,10 @@ enum Commands {
         #[arg(long)]
         rlimits: Option<String>,
 
+        /// VirtioFS DAX (Direct Access) shared memory window size (e.g. 4G, 512M)
+        #[arg(long)]
+        dax: Option<String>,
+
         /// Optional command to override ENTRYPOINT/CMD
         #[arg(last = true)]
         cmd: Vec<String>,
@@ -125,6 +129,26 @@ enum Commands {
 
     /// Stop a running microVM by ID or PID
     Stop {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Pause a running microVM (freezes all vCPUs)
+    Pause {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Resume execution of a paused microVM
+    Resume {
         /// ID or PID of the microVM
         id: String,
 
@@ -303,6 +327,7 @@ async fn main() -> Result<()> {
             dns,
             hostname,
             rlimits,
+            dax,
             cmd,
         } => {
             let mut builder = if let Some(ref b) = bundle {
@@ -327,6 +352,10 @@ async fn main() -> Result<()> {
                 .tty(tty)
                 .detach(detach)
                 .no_network(no_network);
+
+            if let Some(dax_size) = dax {
+                builder = builder.dax_window_size_str(&dax_size)?;
+            }
 
             if let Some(rlim) = rlimits {
                 builder = builder.rlimits(rlim);
@@ -456,7 +485,7 @@ async fn main() -> Result<()> {
 
             let displayed: Vec<_> = vms
                 .into_iter()
-                .filter(|v| all || v.status == VmStatus::Running)
+                .filter(|v| all || v.status == VmStatus::Running || v.status == VmStatus::Paused)
                 .collect();
 
             if displayed.is_empty() {
@@ -480,6 +509,7 @@ async fn main() -> Result<()> {
                 let time_rel = format_duration_since(vm.created_at);
                 let status_str = match vm.status {
                     VmStatus::Running => format!("● Up ({})", time_rel),
+                    VmStatus::Paused => format!("⏸ Paused ({})", time_rel),
                     VmStatus::Stopped => format!("○ Exited ({})", time_rel),
                 };
 
@@ -511,6 +541,30 @@ async fn main() -> Result<()> {
             println!("Stopping microVM '{}'...", id);
             StateManager::stop(&base, &id)?;
             println!("✅ MicroVM '{}' stopped and state cleaned up.", id);
+        }
+
+        Commands::Pause { id, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            match StateManager::pause(&base, &id) {
+                Ok(vm) => {
+                    println!("⏸️  Paused microVM '{}' (PID {})", vm.id, vm.pid);
+                }
+                Err(e) => {
+                    bail!("Failed to pause microVM '{}': {}", id, e);
+                }
+            }
+        }
+
+        Commands::Resume { id, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            match StateManager::resume(&base, &id) {
+                Ok(vm) => {
+                    println!("▶️  Resumed microVM '{}' (PID {})", vm.id, vm.pid);
+                }
+                Err(e) => {
+                    bail!("Failed to resume microVM '{}': {}", id, e);
+                }
+            }
         }
 
         Commands::Rm { id, force, data_dir } => {
@@ -1178,5 +1232,39 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.0 KiB");
         assert_eq!(format_bytes(1024 * 1024 * 10), "10.0 MiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.00 GiB");
+    }
+
+    #[test]
+    fn test_cli_parse_pause_and_resume() {
+        let pause_args = vec!["microvm", "pause", "vm-1234"];
+        let cli = Cli::try_parse_from(pause_args).unwrap();
+        match cli.command {
+            Commands::Pause { id, .. } => {
+                assert_eq!(id, "vm-1234");
+            }
+            _ => panic!("Expected Commands::Pause"),
+        }
+
+        let resume_args = vec!["microvm", "resume", "vm-1234"];
+        let cli = Cli::try_parse_from(resume_args).unwrap();
+        match cli.command {
+            Commands::Resume { id, .. } => {
+                assert_eq!(id, "vm-1234");
+            }
+            _ => panic!("Expected Commands::Resume"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_run_dax() {
+        let run_args = vec!["microvm", "run", "--dax", "4G", "alpine:latest"];
+        let cli = Cli::try_parse_from(run_args).unwrap();
+        match cli.command {
+            Commands::Run { dax, image, .. } => {
+                assert_eq!(image, "alpine:latest");
+                assert_eq!(dax.as_deref(), Some("4G"));
+            }
+            _ => panic!("Expected Commands::Run with --dax"),
+        }
     }
 }

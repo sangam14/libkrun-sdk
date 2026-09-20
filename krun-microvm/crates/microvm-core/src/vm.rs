@@ -93,6 +93,7 @@ pub struct MicroVmBuilder {
     hostname: Option<String>,
     network_mode: crate::net::NetworkMode,
     file_mounts: Vec<(PathBuf, PathBuf)>,
+    dax_window_size: Option<u64>,
 }
 
 impl MicroVmBuilder {
@@ -126,6 +127,7 @@ impl MicroVmBuilder {
             hostname: None,
             network_mode: crate::net::NetworkMode::Tsi,
             file_mounts: Vec::new(),
+            dax_window_size: None,
         }
     }
 
@@ -251,6 +253,18 @@ impl MicroVmBuilder {
     pub fn virtiofs(mut self, tag: &str, path: impl Into<PathBuf>, read_only: bool) -> Self {
         self.virtiofs_mounts.push(VirtioFsMount::new(tag, path, read_only));
         self
+    }
+
+    /// Sets the VirtioFS DAX (Direct Access) shared memory window size in bytes.
+    pub fn dax_window_size(mut self, bytes: u64) -> Self {
+        self.dax_window_size = Some(bytes);
+        self
+    }
+
+    /// Sets the VirtioFS DAX window size from a human-readable string (e.g. "4G", "512M", "1024K").
+    pub fn dax_window_size_str(mut self, s: &str) -> Result<Self> {
+        self.dax_window_size = Some(crate::config::parse_size_to_bytes(s)?);
+        Ok(self)
     }
 
     pub fn vsock_port(mut self, port: u32, path: impl Into<PathBuf>) -> Self {
@@ -517,6 +531,7 @@ impl MicroVmBuilder {
             no_network: self.no_network,
             rlimits: self.rlimits,
             detach: self.detach,
+            dax_window_size_bytes: self.dax_window_size,
         };
 
         let runner_cfg_path = instance_dir.join("runner_config.json");

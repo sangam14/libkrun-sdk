@@ -288,8 +288,12 @@ Inspect supervisor process and thread statistics (`top`):
 ./target/debug/microvm top <vm-id>
 ```
 
-Stop and remove microVM instances (`stop`, `rm`, `prune`):
-```bash
+# Pause / freeze all vCPUs of an active microVM:
+./target/debug/microvm pause <vm-id>
+
+# Resume a paused microVM:
+./target/debug/microvm resume <vm-id>
+
 # Gracefully stop an active microVM:
 ./target/debug/microvm stop <vm-id>
 
@@ -396,6 +400,16 @@ curl http://localhost:1234/v1/chat/completions \
     "model": "default",
     "messages": [{"role": "user", "content": "What is a microVM?"}]
   }'
+```
+
+### 22. VirtioFS DAX Shared Memory Window for Zero-Copy AI Acceleration (`--dax <size>`)
+Direct Access (DAX) enables the microVM to memory-map host files (such as GGUF model weights or databases) directly into the guest address space without data copying:
+```bash
+# Launch with a 4 GB DAX shared memory window:
+./target/debug/microvm run \
+    --dax 4G \
+    --artifact ghcr.io/mistralai/mistral-7b:v0.3:models:ro \
+    ghcr.io/ericlbuehler/mistral.rs:cpu-latest
 ```
 
 ---

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VmStatus {
     Running,
+    Paused,
     Stopped,
 }
 
@@ -114,7 +115,11 @@ impl StateManager {
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(mut vm) = serde_json::from_str::<VmState>(&content) {
                         vm.status = if vm.is_process_alive() {
-                            VmStatus::Running
+                            if vm.status == VmStatus::Paused {
+                                VmStatus::Paused
+                            } else {
+                                VmStatus::Running
+                            }
                         } else {
                             VmStatus::Stopped
                         };
@@ -134,6 +139,60 @@ impl StateManager {
             vm.id == id_or_pid || vm.id.starts_with(id_or_pid) || vm.pid.to_string() == id_or_pid
         });
         Ok(target)
+    }
+
+    pub fn pause(data_dir: &Path, id_or_pid: &str) -> Result<VmState> {
+        let mut vm = match Self::find(data_dir, id_or_pid)? {
+            Some(v) => v,
+            None => bail!("MicroVM with ID or PID '{}' not found", id_or_pid),
+        };
+
+        if !vm.is_process_alive() {
+            bail!("Cannot pause microVM '{}': process is not running", vm.id);
+        }
+
+        if vm.status == VmStatus::Paused {
+            return Ok(vm);
+        }
+
+        unsafe {
+            if libc::kill(vm.pid as i32, libc::SIGSTOP) != 0 {
+                bail!(
+                    "Failed to send SIGSTOP to process {}: {}",
+                    vm.pid,
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        vm.status = VmStatus::Paused;
+        Self::save(data_dir, &vm)?;
+        Ok(vm)
+    }
+
+    pub fn resume(data_dir: &Path, id_or_pid: &str) -> Result<VmState> {
+        let mut vm = match Self::find(data_dir, id_or_pid)? {
+            Some(v) => v,
+            None => bail!("MicroVM with ID or PID '{}' not found", id_or_pid),
+        };
+
+        if !vm.is_process_alive() {
+            bail!("Cannot resume microVM '{}': process is not running", vm.id);
+        }
+
+        unsafe {
+            if libc::kill(vm.pid as i32, libc::SIGCONT) != 0 {
+                bail!(
+                    "Failed to send SIGCONT to process {}: {}",
+                    vm.pid,
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        vm.status = VmStatus::Running;
+        Self::save(data_dir, &vm)?;
+        Ok(vm)
     }
 
     pub fn delete(data_dir: &Path, id_or_pid: &str, force: bool) -> Result<VmState> {
@@ -433,5 +492,33 @@ mod tests {
         // Verify it is gone
         let not_found = StateManager::find(dir.path(), "vm-find-del").unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_state_manager_pause_and_resume_validation() {
+        let dir = tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/vm-pause-test");
+        fs::create_dir_all(&instance_dir).unwrap();
+
+        let vm = VmState {
+            id: "vm-pause-test".to_string(),
+            pid: 999_998, // dead PID
+            image: "alpine:latest".to_string(),
+            created_at: 3000,
+            port_forwards: vec![],
+            instance_dir: instance_dir.clone(),
+            status: VmStatus::Stopped,
+        };
+        StateManager::save(dir.path(), &vm).unwrap();
+
+        // Attempting to pause dead VM fails
+        let pause_res = StateManager::pause(dir.path(), "vm-pause-test");
+        assert!(pause_res.is_err());
+        assert!(pause_res.unwrap_err().to_string().contains("not running"));
+
+        // Attempting to resume dead VM fails
+        let resume_res = StateManager::resume(dir.path(), "vm-pause-test");
+        assert!(resume_res.is_err());
+        assert!(resume_res.unwrap_err().to_string().contains("not running"));
     }
 }

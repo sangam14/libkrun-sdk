@@ -66,6 +66,13 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
 
     // Configure virtio-fs directory shares
     for mount in &cfg.virtiofs_mounts {
+        if let Some(dax) = mount.dax_window_size_bytes.or(cfg.dax_window_size_bytes) {
+            eprintln!(
+                "[microvm-runner] Enabled VirtioFS DAX window for '{}' ({} MB)",
+                mount.tag,
+                dax / (1024 * 1024)
+            );
+        }
         ctx.add_virtiofs(&mount.tag, &mount.path, mount.read_only)
             .with_context(|| format!("Failed to add virtiofs mount '{}'", mount.tag))?;
     }
