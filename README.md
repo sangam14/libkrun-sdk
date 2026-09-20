@@ -19,6 +19,8 @@
 | **CoW Storage** | External tools or loop block devices | devmapper thin-pools or raw block images | Native kernel APFS `clonefile(2)` & Linux `FICLONE` + VirtioFS | Instant snapshotting with zero duplicate disk consumption |
 | **Networking** | Root TAP bridge setup | Requires root privileges for TAP, Bridge, iptables | **Transparent Socket Impersonation (TSI)** + Resilient DNS | **100% Rootless networking** out-of-the-box; zero host bridge hassles |
 | **Platform Support** | Linux only | Linux KVM only (fails on Apple Silicon) | **Universal Silicon**: macOS Apple Silicon (`Hypervisor.framework`) AND Linux KVM (`/dev/kvm`) | Full developer parity across Mac laptops and production Linux nodes |
+| **Direct Access (DAX)** | None / manual external blocks | Complex devmapper attachments | **Native VirtioFS DAX Window (`--dax <size>`)** | Zero-copy mmap of multi-GB LLM weights (GGUF/Safetensors) into guest physical address space |
+| **Lifecycle Controls** | SIGKILL / external daemons | Out-of-process REST socket calls | **Instant `pause` / `resume` + Declarative CRD** | Freeze and unfreeze microVM vCPUs in single-digit milliseconds; declarative sleep/wake in Kubernetes |
 | **Kubernetes CRI** | Monolithic external daemons | `firecracker-containerd` (Go) | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `Task::stats` telemetry |
 
 ---
@@ -140,7 +142,7 @@ The script automatically:
 cd krun-microvm
 make build
 make sign   # Signs microvm-runner with com.apple.security.hypervisor on macOS
-make test   # Runs all 29 unit tests across workspace crates
+make test   # Runs all 33 unit tests across workspace crates
 ```
 
 ---

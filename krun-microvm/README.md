@@ -17,6 +17,8 @@
 | **Boot Latency** | 500ms – 2000ms | **Sub-100ms cold boot** | Instant serverless scaling, microsecond task provisioning |
 | **CoW Filesystem Cloning** | External tools or coarse `x/sys/unix` wrappers | Native kernel APFS `clonefile(2)` & Linux `FICLONE` ioctls | Instant snapshotting with zero duplicate disk consumption |
 | **Safety & Concurrency** | Go M:N runtime scheduler conflicts with hypervisor threads | Deterministic OS thread isolation & async Tokio orchestration | True hardware CPU thread pinning; zero scheduler contention |
+| **Direct Access (DAX)** | None / manual external blocks | **Native VirtioFS DAX Window (`--dax <size>`)** | Zero-copy mmap of multi-GB LLM weights (GGUF/Safetensors) into guest physical address space |
+| **Lifecycle Controls** | SIGKILL / external process kills | **Instant `pause` / `resume` + Declarative CRD** | Freeze and unfreeze microVM vCPUs in single-digit milliseconds; declarative sleep/wake in Kubernetes |
 | **Kubernetes Integration** | Monolithic external daemons or out-of-tree bridges | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `crictl stats` telemetry |
 
 ---
