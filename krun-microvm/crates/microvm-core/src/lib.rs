@@ -1,3 +1,4 @@
+pub mod acceleration;
 pub mod bundle;
 pub mod config;
 pub mod metrics;
@@ -9,7 +10,9 @@ pub mod state;
 pub mod types;
 pub mod vm;
 
+pub use acceleration::{AccelerationFormat, ImageAcceleration};
 pub use bundle::OciBundle;
+
 pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use metrics::{collect_process_stats, ProcessStats};
 pub use net::{DnsConfig, NetworkMode};

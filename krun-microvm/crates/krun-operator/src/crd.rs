@@ -53,6 +53,34 @@ pub struct MicroVmSpec {
     /// VirtioFS DAX shared memory window size (e.g. "4Gi", "512Mi")
     #[serde(rename = "daxWindowSize", default)]
     pub dax_window_size: Option<String>,
+
+    /// Dragonfly Nydus RAFSv6 image acceleration and lazy loading configuration
+    #[serde(rename = "imageAcceleration", default)]
+    pub image_acceleration: Option<ImageAccelerationSpec>,
+}
+
+/// Specification for Dragonfly Nydus RAFSv6 / EROFS image acceleration and lazy loading
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct ImageAccelerationSpec {
+    /// Accelerated format: "rafsv6", "erofs", or "zran"
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Enable instant on-demand lazy loading of chunks
+    #[serde(rename = "lazyLoad", default)]
+    pub lazy_load: Option<bool>,
+
+    /// Host directory for caching downloaded chunk blobs
+    #[serde(rename = "chunkCacheDir", default)]
+    pub chunk_cache_dir: Option<String>,
+
+    /// Chunk or macro-chunk size (e.g. "4Mi", "64Mi")
+    #[serde(rename = "chunkSize", default)]
+    pub chunk_size: Option<String>,
+
+    /// List of paths to prefetch ahead of execution
+    #[serde(default)]
+    pub prefetch: Option<Vec<String>>,
 }
 
 fn default_vcpus() -> u8 {
@@ -91,4 +119,37 @@ pub struct MicroVmStatus {
 
     /// Human-readable message or error description
     pub message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_microvm_spec_serialization_with_acceleration() {
+        let spec_json = r#"{
+            "image": "alpine:latest",
+            "vcpus": 4,
+            "memory": "4Gi",
+            "daxWindowSize": "2Gi",
+            "imageAcceleration": {
+                "format": "rafsv6",
+                "lazyLoad": true,
+                "chunkCacheDir": "/var/cache/nydus",
+                "chunkSize": "64Mi",
+                "prefetch": ["/bin", "/lib"]
+            }
+        }"#;
+
+        let spec: MicroVmSpec = serde_json::from_str(spec_json).unwrap();
+        assert_eq!(spec.image, "alpine:latest");
+        assert_eq!(spec.vcpus, 4);
+        assert_eq!(spec.dax_window_size.as_deref(), Some("2Gi"));
+
+        let acc = spec.image_acceleration.expect("Expected imageAcceleration");
+        assert_eq!(acc.format.as_deref(), Some("rafsv6"));
+        assert_eq!(acc.lazy_load, Some(true));
+        assert_eq!(acc.chunk_size.as_deref(), Some("64Mi"));
+        assert_eq!(acc.prefetch.as_ref().unwrap().len(), 2);
+    }
 }

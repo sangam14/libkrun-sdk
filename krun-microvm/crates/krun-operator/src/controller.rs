@@ -95,6 +95,17 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
             if let Some(ref model) = vm.spec.model_artifact {
                 annotations.insert("krun.io/model-artifact".to_string(), serde_json::Value::String(model.clone()));
             }
+            if let Some(ref acc) = vm.spec.image_acceleration {
+                if let Some(ref fmt) = acc.format {
+                    annotations.insert("krun.io/image-acceleration-format".to_string(), serde_json::Value::String(fmt.clone()));
+                }
+                if let Some(lazy) = acc.lazy_load {
+                    annotations.insert("krun.io/image-acceleration-lazy-load".to_string(), serde_json::Value::String(lazy.to_string()));
+                }
+                if let Some(ref sz) = acc.chunk_size {
+                    annotations.insert("krun.io/image-acceleration-chunk-size".to_string(), serde_json::Value::String(sz.clone()));
+                }
+            }
 
             let pod_manifest: Pod = serde_json::from_value(serde_json::json!({
                 "apiVersion": "v1",

@@ -91,9 +91,37 @@ spec:
                 description: VirtioFS DAX shared memory window size (e.g. "4Gi", "512Mi")
                 nullable: true
                 type: string
+              imageAcceleration:
+                description: Dragonfly Nydus RAFSv6 / EROFS image acceleration and lazy loading
+                nullable: true
+                properties:
+                  format:
+                    description: Accelerated format (rafsv6, erofs, zran)
+                    nullable: true
+                    type: string
+                  lazyLoad:
+                    description: Enable instant on-demand lazy loading of chunks
+                    nullable: true
+                    type: boolean
+                  chunkCacheDir:
+                    description: Host directory for caching downloaded chunk blobs
+                    nullable: true
+                    type: string
+                  chunkSize:
+                    description: Chunk or macro-chunk size (e.g. "4Mi", "64Mi")
+                    nullable: true
+                    type: string
+                  prefetch:
+                    description: List of paths to prefetch ahead of execution
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                type: object
             required:
             - image
             type: object
+
           status:
             nullable: true
             properties:

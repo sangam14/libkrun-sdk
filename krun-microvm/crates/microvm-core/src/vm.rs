@@ -94,7 +94,9 @@ pub struct MicroVmBuilder {
     network_mode: crate::net::NetworkMode,
     file_mounts: Vec<(PathBuf, PathBuf)>,
     dax_window_size: Option<u64>,
+    image_acceleration: Option<crate::acceleration::ImageAcceleration>,
 }
+
 
 impl MicroVmBuilder {
     pub fn new(image: impl Into<String>) -> Self {
@@ -128,8 +130,10 @@ impl MicroVmBuilder {
             network_mode: crate::net::NetworkMode::Tsi,
             file_mounts: Vec::new(),
             dax_window_size: None,
+            image_acceleration: None,
         }
     }
+
 
     /// Creates a MicroVmBuilder from an unpacked OCI runtime bundle directory (containing config.json and rootfs/).
     pub fn from_bundle(bundle_dir: impl AsRef<Path>) -> Result<Self> {
@@ -265,6 +269,49 @@ impl MicroVmBuilder {
     pub fn dax_window_size_str(mut self, s: &str) -> Result<Self> {
         self.dax_window_size = Some(crate::config::parse_size_to_bytes(s)?);
         Ok(self)
+    }
+
+    /// Configures Dragonfly Nydus RAFSv6 / EROFS image acceleration and lazy loading.
+    pub fn image_acceleration(mut self, acceleration: crate::acceleration::ImageAcceleration) -> Self {
+        self.image_acceleration = Some(acceleration);
+        self
+    }
+
+    /// Toggles on-demand lazy loading (RAFSv6 chunk streaming).
+    pub fn lazy_load(mut self, enabled: bool) -> Self {
+        let mut acc = self.image_acceleration.take().unwrap_or_default();
+        acc.lazy_load = enabled;
+        self.image_acceleration = Some(acc);
+        self
+    }
+
+    /// Configures explicit path to a local RAFS v6 or EROFS metadata bootstrap image.
+    pub fn nydus_bootstrap(mut self, path: impl Into<PathBuf>) -> Self {
+        let mut acc = self.image_acceleration.take().unwrap_or_default();
+        acc.bootstrap_path = Some(path.into());
+        self.image_acceleration = Some(acc);
+        self
+    }
+
+    /// Sets the directory where downloaded chunk blobs are cached and deduplicated.
+    pub fn chunk_cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        let mut acc = self.image_acceleration.take().unwrap_or_default();
+        acc.chunk_cache_dir = Some(path.into());
+        self.image_acceleration = Some(acc);
+        self
+    }
+
+    /// Sets the chunk or macro-chunk size for streaming (e.g. "4M", "64M").
+    pub fn chunk_size_str(mut self, s: &str) -> Result<Self> {
+        let bytes = crate::config::parse_size_to_bytes(s)?;
+        let mut acc = self.image_acceleration.take().unwrap_or_default();
+        acc.chunk_size_bytes = Some(bytes);
+        self.image_acceleration = Some(acc);
+        Ok(self)
+    }
+
+    pub fn get_image_acceleration(&self) -> Option<&crate::acceleration::ImageAcceleration> {
+        self.image_acceleration.as_ref()
     }
 
     pub fn vsock_port(mut self, port: u32, path: impl Into<PathBuf>) -> Self {
@@ -495,6 +542,24 @@ impl MicroVmBuilder {
             ));
         }
 
+        // 5c-2. Attach accelerated Nydus chunk blob cache directory if lazy loading is enabled
+        if let Some(ref acc) = self.image_acceleration {
+            if acc.lazy_load {
+                let cache_dir = acc.chunk_cache_dir.clone().unwrap_or_else(|| data_dir.join("nydus-cache"));
+                let _ = fs::create_dir_all(&cache_dir);
+                tracing::info!(
+                    "Configuring accelerated chunk cache at {} (format: {:?})...",
+                    cache_dir.display(),
+                    acc.format
+                );
+                let mut chunk_mount = VirtioFsMount::new("nydus-blobs", &cache_dir, true);
+                if let Some(dax_bytes) = self.dax_window_size {
+                    chunk_mount = chunk_mount.with_dax(dax_bytes);
+                }
+                final_virtiofs_mounts.push(chunk_mount);
+            }
+        }
+
         // Ensure mount directory exists in guest rootfs for all virtiofs tags
         for m in &final_virtiofs_mounts {
             let _ = fs::create_dir_all(instance_rootfs.join(&m.tag));
@@ -532,6 +597,7 @@ impl MicroVmBuilder {
             rlimits: self.rlimits,
             detach: self.detach,
             dax_window_size_bytes: self.dax_window_size,
+            image_acceleration: self.image_acceleration.clone(),
         };
 
         let runner_cfg_path = instance_dir.join("runner_config.json");
@@ -867,6 +933,34 @@ mod tests {
             builder.get_file_mounts()[0],
             (host_file, PathBuf::from("/etc/config/app.yaml"))
         );
+    }
+
+    #[test]
+    fn test_builder_image_acceleration() {
+        let builder = MicroVmBuilder::new("alpine:latest")
+            .lazy_load(true)
+            .chunk_size_str("64M")
+            .unwrap()
+            .chunk_cache_dir("/var/cache/nydus");
+
+        let acc = builder.get_image_acceleration().expect("Expected image acceleration");
+        assert!(acc.lazy_load);
+        assert_eq!(acc.chunk_size_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(acc.chunk_cache_dir, Some(PathBuf::from("/var/cache/nydus")));
+    }
+
+    #[test]
+    fn test_builder_lazy_load_with_bootstrap() {
+        let bootstrap_path = PathBuf::from("/tmp/nydus-bootstrap.rafs");
+        let builder = MicroVmBuilder::new("my-image:latest")
+            .nydus_bootstrap(&bootstrap_path)
+            .dax_window_size_str("4G")
+            .unwrap();
+
+        let acc = builder.get_image_acceleration().unwrap();
+        assert!(acc.lazy_load);
+        assert_eq!(acc.bootstrap_path, Some(bootstrap_path));
+        assert_eq!(builder.dax_window_size, Some(4 * 1024 * 1024 * 1024));
     }
 }
 

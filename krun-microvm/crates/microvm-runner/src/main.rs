@@ -64,6 +64,15 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             .context("Failed to configure TSI port map")?;
     }
 
+    if let Some(ref acc) = cfg.image_acceleration {
+        eprintln!(
+            "[microvm-runner] Image Acceleration active: format={:?}, lazy_load={}, chunk_size={} KB",
+            acc.format,
+            acc.lazy_load,
+            acc.chunk_size_bytes.unwrap_or(4 * 1024 * 1024) / 1024
+        );
+    }
+
     // Configure virtio-fs directory shares
     for mount in &cfg.virtiofs_mounts {
         if let Some(dax) = mount.dax_window_size_bytes.or(cfg.dax_window_size_bytes) {

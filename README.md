@@ -20,6 +20,7 @@
 | **Networking** | Root TAP bridge setup | Requires root privileges for TAP, Bridge, iptables | **Transparent Socket Impersonation (TSI)** + Resilient DNS | **100% Rootless networking** out-of-the-box; zero host bridge hassles |
 | **Platform Support** | Linux only | Linux KVM only (fails on Apple Silicon) | **Universal Silicon**: macOS Apple Silicon (`Hypervisor.framework`) AND Linux KVM (`/dev/kvm`) | Full developer parity across Mac laptops and production Linux nodes |
 | **Direct Access (DAX)** | None / manual external blocks | Complex devmapper attachments | **Native VirtioFS DAX Window (`--dax <size>`)** | Zero-copy mmap of multi-GB LLM weights (GGUF/Safetensors) into guest physical address space |
+| **Image Acceleration** | Full layer tar download & untar required (~minutes) | Full rootfs block download required | **Dragonfly Nydus RAFSv6 Lazy Loading (`--lazy-load`)** | Sub-50ms cold starts with metadata bootstrap; zero-copy on-demand chunk streaming over VirtioFS DAX |
 | **Lifecycle Controls** | SIGKILL / external daemons | Out-of-process REST socket calls | **Instant `pause` / `resume` + Declarative CRD** | Freeze and unfreeze microVM vCPUs in single-digit milliseconds; declarative sleep/wake in Kubernetes |
 | **Kubernetes CRI** | Monolithic external daemons | `firecracker-containerd` (Go) | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `Task::stats` telemetry |
 
@@ -365,7 +366,24 @@ microvm run \
     ghcr.io/ericlbuehler/mistral.rs:cpu-latest
 ```
 
+### 21. Dragonfly Nydus RAFSv6 Acceleration & On-Demand Lazy Loading (`--lazy-load`)
+`libkrun-sdk` natively integrates Dragonfly Nydus RAFSv6 / in-kernel EROFS accelerated filesystems. Instead of downloading and uncompressing gigabytes of OCI tarball layers on container boot:
+- Only the lightweight RAFS metadata bootstrap (~1–2 MB) is loaded.
+- The microVM boots in **sub-50ms**.
+- File chunks and AI model tensors (with support for macro-chunks up to 64MB) are streamed lazily on-demand over VirtioFS DAX shared memory.
+
+```bash
+# Boot instantly using Nydus RAFSv6 lazy loading:
+microvm run \
+    --lazy-load \
+    --nydus-cache /var/cache/nydus-blobs \
+    --chunk-size 64M \
+    --dax 4G \
+    quay.io/sandstone/deepseek-r1:nydus-latest
+```
+
 ---
+
 
 ## Hardware-Isolated LLM Inference with mistral.rs
 

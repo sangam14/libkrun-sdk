@@ -107,6 +107,22 @@ enum Commands {
         #[arg(long)]
         dax: Option<String>,
 
+        /// Enable Dragonfly Nydus RAFSv6 instant on-demand lazy loading
+        #[arg(long = "lazy-load")]
+        lazy_load: bool,
+
+        /// Path to local RAFSv6 / EROFS metadata bootstrap image
+        #[arg(long = "nydus-bootstrap")]
+        nydus_bootstrap: Option<PathBuf>,
+
+        /// Directory for caching downloaded Nydus chunk blobs
+        #[arg(long = "nydus-cache")]
+        nydus_cache: Option<PathBuf>,
+
+        /// Chunk or macro-chunk size for streaming (e.g. 4M, 64M)
+        #[arg(long = "chunk-size")]
+        chunk_size: Option<String>,
+
         /// Optional command to override ENTRYPOINT/CMD
         #[arg(last = true)]
         cmd: Vec<String>,
@@ -328,6 +344,10 @@ async fn main() -> Result<()> {
             hostname,
             rlimits,
             dax,
+            lazy_load,
+            nydus_bootstrap,
+            nydus_cache,
+            chunk_size,
             cmd,
         } => {
             let mut builder = if let Some(ref b) = bundle {
@@ -355,6 +375,19 @@ async fn main() -> Result<()> {
 
             if let Some(dax_size) = dax {
                 builder = builder.dax_window_size_str(&dax_size)?;
+            }
+
+            if lazy_load || nydus_bootstrap.is_some() {
+                builder = builder.lazy_load(true);
+            }
+            if let Some(bootstrap) = nydus_bootstrap {
+                builder = builder.nydus_bootstrap(bootstrap);
+            }
+            if let Some(cache) = nydus_cache {
+                builder = builder.chunk_cache_dir(cache);
+            }
+            if let Some(chunk_sz) = chunk_size {
+                builder = builder.chunk_size_str(&chunk_sz)?;
             }
 
             if let Some(rlim) = rlimits {
@@ -1265,6 +1298,44 @@ mod tests {
                 assert_eq!(dax.as_deref(), Some("4G"));
             }
             _ => panic!("Expected Commands::Run with --dax"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_run_lazy_load() {
+        let run_args = vec![
+            "microvm",
+            "run",
+            "--lazy-load",
+            "--nydus-bootstrap",
+            "/tmp/bootstrap.rafs",
+            "--nydus-cache",
+            "/var/cache/nydus",
+            "--chunk-size",
+            "64M",
+            "--dax",
+            "2G",
+            "alpine:latest",
+        ];
+        let cli = Cli::try_parse_from(run_args).unwrap();
+        match cli.command {
+            Commands::Run {
+                lazy_load,
+                nydus_bootstrap,
+                nydus_cache,
+                chunk_size,
+                dax,
+                image,
+                ..
+            } => {
+                assert!(lazy_load);
+                assert_eq!(nydus_bootstrap, Some(PathBuf::from("/tmp/bootstrap.rafs")));
+                assert_eq!(nydus_cache, Some(PathBuf::from("/var/cache/nydus")));
+                assert_eq!(chunk_size.as_deref(), Some("64M"));
+                assert_eq!(dax.as_deref(), Some("2G"));
+                assert_eq!(image, "alpine:latest");
+            }
+            _ => panic!("Expected Commands::Run with --lazy-load"),
         }
     }
 }

@@ -87,4 +87,7 @@ pub struct RunnerConfig {
     pub detach: bool,
     #[serde(default)]
     pub dax_window_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub image_acceleration: Option<crate::acceleration::ImageAcceleration>,
 }
+
