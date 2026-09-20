@@ -1762,6 +1762,7 @@ dependencies = [
 name = "krun-sys"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "libc",
  "thiserror 1.0.69",
 ]

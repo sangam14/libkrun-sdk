@@ -93,6 +93,9 @@ pub struct MicroVmBuilder {
     file_mounts: Vec<(PathBuf, PathBuf)>,
     dax_window_size: Option<u64>,
     image_acceleration: Option<crate::acceleration::ImageAcceleration>,
+    gpu: bool,
+    gpu_shm_size: Option<u64>,
+    gpu_flags: Option<u32>,
 }
 
 impl MicroVmBuilder {
@@ -128,6 +131,9 @@ impl MicroVmBuilder {
             file_mounts: Vec::new(),
             dax_window_size: None,
             image_acceleration: None,
+            gpu: false,
+            gpu_shm_size: None,
+            gpu_flags: None,
         }
     }
 
@@ -182,6 +188,14 @@ impl MicroVmBuilder {
 
     pub fn get_file_mounts(&self) -> &[(PathBuf, PathBuf)] {
         &self.file_mounts
+    }
+
+    pub fn get_gpu(&self) -> bool {
+        self.gpu
+    }
+
+    pub fn get_gpu_shm_size(&self) -> Option<u64> {
+        self.gpu_shm_size
     }
 
     pub fn net_sock_path(mut self, path: impl Into<String>) -> Self {
@@ -366,6 +380,24 @@ impl MicroVmBuilder {
 
     pub fn rlimits(mut self, rlimits: impl Into<String>) -> Self {
         self.rlimits = Some(rlimits.into());
+        self
+    }
+
+    /// Enable or disable hardware-accelerated virtio-gpu (Metal on Apple Silicon, DRM on Linux).
+    pub fn gpu(mut self, enabled: bool) -> Self {
+        self.gpu = enabled;
+        self
+    }
+
+    /// Configure shared memory vRAM host window size in bytes for virtio-gpu device.
+    pub fn gpu_shm_size(mut self, bytes: u64) -> Self {
+        self.gpu_shm_size = Some(bytes);
+        self
+    }
+
+    /// Custom virglrenderer flags (defaults to Venus/Metal acceleration flags).
+    pub fn gpu_flags(mut self, flags: u32) -> Self {
+        self.gpu_flags = Some(flags);
         self
     }
 
@@ -629,6 +661,9 @@ impl MicroVmBuilder {
             detach: self.detach,
             dax_window_size_bytes: self.dax_window_size,
             image_acceleration: self.image_acceleration.clone(),
+            gpu: self.gpu,
+            gpu_shm_size_bytes: self.gpu_shm_size,
+            gpu_flags: self.gpu_flags,
         };
 
         let runner_cfg_path = instance_dir.join("runner_config.json");
@@ -992,5 +1027,17 @@ mod tests {
         assert!(acc.lazy_load);
         assert_eq!(acc.bootstrap_path, Some(bootstrap_path));
         assert_eq!(builder.dax_window_size, Some(4 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_builder_gpu_config() {
+        let builder = MicroVmBuilder::new("pytorch/pytorch:latest")
+            .gpu(true)
+            .gpu_shm_size(8 * 1024 * 1024 * 1024)
+            .gpu_flags(0x40);
+
+        assert!(builder.get_gpu());
+        assert_eq!(builder.get_gpu_shm_size(), Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(builder.gpu_flags, Some(0x40));
     }
 }

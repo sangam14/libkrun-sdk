@@ -31,10 +31,26 @@ pub enum KrunError {
     AddNetUnixStream(i32),
     #[error("Failed to add vsock port, error code: {0}")]
     AddVsockPort(i32),
+    #[error("Failed to configure virtio-gpu device, error code: {0}")]
+    SetGpuOptions(i32),
     #[error("Failed to start VM via krun_start_enter, error code: {0}")]
     StartEnter(i32),
     #[error("Nul byte in string argument: {0}")]
     NulError(#[from] std::ffi::NulError),
+}
+
+pub mod virgl_flags {
+    pub const VIRGLRENDERER_USE_EGL: u32 = 1 << 0;
+    pub const VIRGLRENDERER_THREAD_SYNC: u32 = 1 << 1;
+    pub const VIRGLRENDERER_USE_GLX: u32 = 1 << 2;
+    pub const VIRGLRENDERER_USE_SURFACELESS: u32 = 1 << 3;
+    pub const VIRGLRENDERER_USE_GLES: u32 = 1 << 4;
+    pub const VIRGLRENDERER_USE_EXTERNAL_BLOB: u32 = 1 << 5;
+    pub const VIRGLRENDERER_VENUS: u32 = 1 << 6;
+    pub const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
+    pub const VIRGLRENDERER_USE_ASYNC_FENCE_CB: u32 = 1 << 8;
+    pub const VIRGLRENDERER_RENDER_SERVER: u32 = 1 << 9;
+    pub const VIRGLRENDERER_DRM: u32 = 1 << 10;
 }
 
 pub mod ffi {
@@ -60,6 +76,8 @@ pub mod ffi {
         pub fn krun_set_console_output(ctx_id: u32, filepath: *const c_char) -> i32;
         pub fn krun_set_log_level(level: u32) -> i32;
         pub fn krun_set_rlimits(ctx_id: u32, rlimits: *const c_char) -> i32;
+        pub fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
+        pub fn krun_set_gpu_options2(ctx_id: u32, virgl_flags: u32, shm_size: u64) -> i32;
         pub fn krun_add_virtiofs(ctx_id: u32, tag: *const c_char, path: *const c_char) -> i32;
         pub fn krun_add_virtiofs2(
             ctx_id: u32,
@@ -197,6 +215,26 @@ impl KrunContext {
         let rc = unsafe { ffi::krun_set_rlimits(self.ctx_id, c_rlimits.as_ptr()) };
         if rc != 0 {
             return Err(KrunError::SetRlimits(rc));
+        }
+        Ok(())
+    }
+
+    /// Enables and configures virtio-gpu device with virglrenderer / Venus flags.
+    ///
+    /// If `shm_size_bytes` is provided, specifies the shared memory host window (vRAM)
+    /// for zero-copy buffer sharing between host GPU and guest workloads.
+    pub fn set_gpu_options(
+        &mut self,
+        virgl_flags: u32,
+        shm_size_bytes: Option<u64>,
+    ) -> Result<(), KrunError> {
+        let rc = if let Some(shm) = shm_size_bytes {
+            unsafe { ffi::krun_set_gpu_options2(self.ctx_id, virgl_flags, shm) }
+        } else {
+            unsafe { ffi::krun_set_gpu_options(self.ctx_id, virgl_flags) }
+        };
+        if rc != 0 {
+            return Err(KrunError::SetGpuOptions(rc));
         }
         Ok(())
     }

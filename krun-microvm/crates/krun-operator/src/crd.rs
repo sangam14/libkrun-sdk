@@ -57,6 +57,14 @@ pub struct MicroVmSpec {
     /// Dragonfly Nydus RAFSv6 image acceleration and lazy loading configuration
     #[serde(rename = "imageAcceleration", default)]
     pub image_acceleration: Option<ImageAccelerationSpec>,
+
+    /// Enable hardware-accelerated virtio-gpu (Metal on Apple Silicon, DRM on Linux)
+    #[serde(default)]
+    pub gpu: Option<bool>,
+
+    /// Shared memory vRAM window size for virtio-gpu (e.g. "4Gi", "8Gi")
+    #[serde(rename = "gpuShmSize", default)]
+    pub gpu_shm_size: Option<String>,
 }
 
 /// Specification for Dragonfly Nydus RAFSv6 / EROFS image acceleration and lazy loading

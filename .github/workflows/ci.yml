@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Code Quality & Lints
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: krun-microvm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Check code formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    defaults:
+      run:
+        working-directory: krun-microvm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install macOS dependencies (libkrun)
+        if: runner.os == 'macOS'
+        run: |
+          brew tap slp/krun || true
+          brew install libkrun || true
+
+      - name: Run test suite
+        run: cargo test --workspace --verbose
+
+  build-release:
+    name: Build Release Binaries (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: krun-microvm-darwin-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: krun-microvm-linux-amd64
+    defaults:
+      run:
+        working-directory: krun-microvm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install macOS dependencies (libkrun)
+        if: runner.os == 'macOS'
+        run: |
+          brew tap slp/krun || true
+          brew install libkrun || true
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Package release bundle
+        run: |
+          mkdir -p dist
+          cp target/release/microvm dist/
+          cp target/release/microvm-runner dist/
+          cp target/release/containerd-shim-krun-v2 dist/
+          cp target/release/krun-operator dist/
+          tar -czvf ${{ matrix.artifact_name }}.tar.gz -C dist .
+          shasum -a 256 ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            krun-microvm/${{ matrix.artifact_name }}.tar.gz
+            krun-microvm/${{ matrix.artifact_name }}.tar.gz.sha256

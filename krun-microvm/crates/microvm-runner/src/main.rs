@@ -73,6 +73,25 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         );
     }
 
+    // Configure optional virtio-gpu (Metal on Apple Silicon, Venus/DRM on Linux)
+    if cfg.gpu {
+        use krun_sys::virgl_flags::*;
+        let flags = cfg.gpu_flags.unwrap_or(
+            VIRGLRENDERER_USE_EGL
+                | VIRGLRENDERER_THREAD_SYNC
+                | VIRGLRENDERER_USE_SURFACELESS
+                | VIRGLRENDERER_VENUS
+                | VIRGLRENDERER_DRM,
+        );
+        let shm_mb = cfg.gpu_shm_size_bytes.unwrap_or(0) / (1024 * 1024);
+        eprintln!(
+            "[microvm-runner] Enabling hardware-accelerated virtio-gpu (vRAM shm: {} MB, flags: 0x{:x})",
+            shm_mb, flags
+        );
+        ctx.set_gpu_options(flags, cfg.gpu_shm_size_bytes)
+            .context("Failed to configure virtio-gpu options")?;
+    }
+
     // Configure virtio-fs directory shares
     for mount in &cfg.virtiofs_mounts {
         if let Some(dax) = mount.dax_window_size_bytes.or(cfg.dax_window_size_bytes) {

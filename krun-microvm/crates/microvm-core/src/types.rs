@@ -89,4 +89,10 @@ pub struct RunnerConfig {
     pub dax_window_size_bytes: Option<u64>,
     #[serde(default)]
     pub image_acceleration: Option<crate::acceleration::ImageAcceleration>,
+    #[serde(default)]
+    pub gpu: bool,
+    #[serde(default)]
+    pub gpu_shm_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub gpu_flags: Option<u32>,
 }

@@ -452,7 +452,51 @@ spec:
       - "/lib"
 ```
 
+### 24. Hardware-Accelerated GPU Passthrough (`--gpu`, `--gpu-shm-size`)
+Run GPU compute and graphic workloads inside microVMs with near-native performance. Powered by `virglrenderer` and Venus Vulkan/Metal backend:
+- **Apple Silicon (macOS)**: Hardware Metal compute acceleration.
+- **Linux**: Direct Rendering Manager (DRM) / Venus Vulkan acceleration.
+
+```bash
+# Launch container with GPU passthrough and 4 GB vRAM shared memory:
+./target/release/microvm run \
+    --gpu \
+    --gpu-shm-size 4G \
+    ghcr.io/ericlbuehler/mistral.rs:latest
+```
+
+#### Declarative GPU Acceleration in Kubernetes:
+```yaml
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: gpu-inference-worker
+spec:
+  image: "ghcr.io/ericlbuehler/mistral.rs:latest"
+  vcpus: 8
+  memory: "16Gi"
+  gpu: true
+  gpuShmSize: "8Gi"
+```
+
+### 25. Interactive In-Guest Exec (`microvm exec`)
+Execute commands directly inside an active, running microVM without restarting the instance, identical to `docker exec` / `kubectl exec`:
+```bash
+# Execute interactive shell inside running microVM:
+./target/release/microvm exec -t <vm-id> /bin/sh
+
+# Run a non-interactive diagnostic command with custom env and working directory:
+./target/release/microvm exec -w /app -e DEBUG=1 <vm-id> uname -a
+```
+
+### 26. Enterprise Multi-Architecture CI/CD Pipeline
+Continuous integration powered by GitHub Actions across:
+- **macOS 14 (Apple Silicon arm64)**: Native Metal acceleration, Hypervisor.framework tests.
+- **Ubuntu Latest (x86_64 Linux)**: KVM virtualization, automated linting, test suite, and release packaging.
+- **Zero-Warning Guarantee**: Enforced `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ---
+
 
 
 ## Kubernetes & containerd Integration (`RuntimeClass: krun`)

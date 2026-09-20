@@ -69,7 +69,8 @@ impl VmState {
         if self.pid == 0 {
             return false;
         }
-        let alive = unsafe { libc::kill(self.pid as i32, 0) == 0 };
+        let alive =
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.pid as i32), None).is_ok();
         if !alive {
             return false;
         }
@@ -78,6 +79,16 @@ impl VmState {
             return true;
         }
         is_microvm_runner_process(self.pid)
+    }
+
+    /// Path to the isolated vsock socket for guest command execution.
+    pub fn exec_socket_path(&self) -> PathBuf {
+        self.instance_dir.join("vsock-exec.sock")
+    }
+
+    /// Path to the guest root filesystem.
+    pub fn rootfs_path(&self) -> PathBuf {
+        self.instance_dir.join("rootfs")
     }
 }
 
@@ -361,6 +372,31 @@ impl StateManager {
             fs::copy(&src_guest, dst_host)?;
         }
         Ok(())
+    }
+
+    /// Executes a command in a running microVM.
+    pub async fn exec(
+        data_dir: &Path,
+        id_or_pid: &str,
+        req: &crate::exec::ExecRequest,
+    ) -> Result<crate::exec::ExecResponse> {
+        let vms = Self::list(data_dir)?;
+        let vm = vms
+            .iter()
+            .find(|v| {
+                v.id == id_or_pid || v.id.starts_with(id_or_pid) || v.pid.to_string() == id_or_pid
+            })
+            .ok_or_else(|| anyhow::anyhow!("MicroVM '{}' not found", id_or_pid))?;
+
+        if vm.status != VmStatus::Running || !vm.is_process_alive() {
+            bail!(
+                "Cannot exec in microVM '{}' because it is not running (status: {:?})",
+                id_or_pid,
+                vm.status
+            );
+        }
+
+        crate::exec::exec_in_microvm(&vm.exec_socket_path(), &vm.rootfs_path(), req).await
     }
 }
 

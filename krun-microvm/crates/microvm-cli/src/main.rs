@@ -121,6 +121,14 @@ pub struct RunArgs {
     #[arg(long = "chunk-size")]
     pub chunk_size: Option<String>,
 
+    /// Enable hardware-accelerated virtio-gpu (Apple Silicon Metal / Linux DRM Venus)
+    #[arg(long)]
+    pub gpu: bool,
+
+    /// Shared memory vRAM window size for virtio-gpu (e.g. 2G, 4G, 8G)
+    #[arg(long = "gpu-shm-size")]
+    pub gpu_shm_size: Option<String>,
+
     /// Optional command to override ENTRYPOINT/CMD
     #[arg(last = true)]
     pub cmd: Vec<String>,
@@ -130,6 +138,32 @@ pub struct RunArgs {
 enum Commands {
     /// Run an OCI container image as a microVM
     Run(Box<RunArgs>),
+
+    /// Execute a command inside a running microVM
+    Exec {
+        /// ID or PID of the running microVM
+        id: String,
+
+        /// Environment variables (KEY=VALUE)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+
+        /// Working directory inside guest
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+
+        /// Allocate a pseudo-TTY
+        #[arg(short = 't', long)]
+        tty: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Command and arguments to execute
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        cmd: Vec<String>,
+    },
 
     /// List running and recent microVMs
     Ps {
@@ -352,6 +386,8 @@ async fn main() -> Result<()> {
                 nydus_bootstrap,
                 nydus_cache,
                 chunk_size,
+                gpu,
+                gpu_shm_size,
                 cmd,
             } = *run;
             let mut builder = if let Some(ref b) = bundle {
@@ -376,6 +412,15 @@ async fn main() -> Result<()> {
                 .tty(tty)
                 .detach(detach)
                 .no_network(no_network);
+
+            if gpu {
+                builder = builder.gpu(true);
+                if let Some(shm) = gpu_shm_size {
+                    let bytes = microvm_core::parse_size_to_bytes(&shm)
+                        .context("Invalid --gpu-shm-size format (e.g. 2G, 512M)")?;
+                    builder = builder.gpu_shm_size(bytes);
+                }
+            }
 
             if let Some(dax_size) = dax {
                 builder = builder.dax_window_size_str(&dax_size)?;
@@ -576,6 +621,36 @@ async fn main() -> Result<()> {
                     "{:<16} {:<24} {:<8} {:<18} {:<18}",
                     id_display, image_display, vm.pid, status_str, port_str
                 );
+            }
+        }
+
+        Commands::Exec {
+            id,
+            env,
+            workdir,
+            tty,
+            data_dir,
+            cmd,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let mut req = microvm_core::ExecRequest::new(cmd)
+                .with_env(env)
+                .with_tty(tty);
+            if let Some(wd) = workdir {
+                req = req.with_workdir(wd);
+            }
+            let resp = StateManager::exec(&base, &id, &req).await?;
+            if !resp.stdout.is_empty() {
+                print!("{}", resp.stdout);
+            }
+            if !resp.stderr.is_empty() {
+                eprint!("{}", resp.stderr);
+            }
+            if let Some(err) = resp.error {
+                eprintln!("Exec error: {}", err);
+            }
+            if resp.exit_code != 0 {
+                std::process::exit(resp.exit_code);
             }
         }
 
@@ -1424,6 +1499,61 @@ mod tests {
                 assert_eq!(run.image, "alpine:latest");
             }
             _ => panic!("Expected Commands::Run with --lazy-load"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_run_gpu() {
+        let run_args = vec![
+            "microvm",
+            "run",
+            "--gpu",
+            "--gpu-shm-size",
+            "4G",
+            "ghcr.io/ericlbuehler/mistral.rs:latest",
+        ];
+        let cli = Cli::try_parse_from(run_args).unwrap();
+        match cli.command {
+            Commands::Run(run) => {
+                assert!(run.gpu);
+                assert_eq!(run.gpu_shm_size.as_deref(), Some("4G"));
+                assert_eq!(run.image, "ghcr.io/ericlbuehler/mistral.rs:latest");
+            }
+            _ => panic!("Expected Commands::Run with --gpu"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_exec() {
+        let exec_args = vec![
+            "microvm",
+            "exec",
+            "-t",
+            "-w",
+            "/app",
+            "-e",
+            "PORT=9000",
+            "vm-12345",
+            "uname",
+            "-a",
+        ];
+        let cli = Cli::try_parse_from(exec_args).unwrap();
+        match cli.command {
+            Commands::Exec {
+                id,
+                env,
+                workdir,
+                tty,
+                cmd,
+                ..
+            } => {
+                assert_eq!(id, "vm-12345");
+                assert_eq!(env, vec!["PORT=9000"]);
+                assert_eq!(workdir.as_deref(), Some("/app"));
+                assert!(tty);
+                assert_eq!(cmd, vec!["uname", "-a"]);
+            }
+            _ => panic!("Expected Commands::Exec"),
         }
     }
 }
