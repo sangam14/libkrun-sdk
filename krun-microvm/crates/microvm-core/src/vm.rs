@@ -25,9 +25,7 @@ impl RawModeGuard {
         let is_tty = unsafe { libc::isatty(stdin.as_raw_fd()) == 1 };
 
         if !is_tty {
-            return Ok(Self {
-                orig_termios: None,
-            });
+            return Ok(Self { orig_termios: None });
         }
 
         let orig = tcgetattr(&stdin)?;
@@ -97,7 +95,6 @@ pub struct MicroVmBuilder {
     image_acceleration: Option<crate::acceleration::ImageAcceleration>,
 }
 
-
 impl MicroVmBuilder {
     pub fn new(image: impl Into<String>) -> Self {
         Self {
@@ -133,7 +130,6 @@ impl MicroVmBuilder {
             image_acceleration: None,
         }
     }
-
 
     /// Creates a MicroVmBuilder from an unpacked OCI runtime bundle directory (containing config.json and rootfs/).
     pub fn from_bundle(bundle_dir: impl AsRef<Path>) -> Result<Self> {
@@ -255,7 +251,8 @@ impl MicroVmBuilder {
     }
 
     pub fn virtiofs(mut self, tag: &str, path: impl Into<PathBuf>, read_only: bool) -> Self {
-        self.virtiofs_mounts.push(VirtioFsMount::new(tag, path, read_only));
+        self.virtiofs_mounts
+            .push(VirtioFsMount::new(tag, path, read_only));
         self
     }
 
@@ -272,7 +269,10 @@ impl MicroVmBuilder {
     }
 
     /// Configures Dragonfly Nydus RAFSv6 / EROFS image acceleration and lazy loading.
-    pub fn image_acceleration(mut self, acceleration: crate::acceleration::ImageAcceleration) -> Self {
+    pub fn image_acceleration(
+        mut self,
+        acceleration: crate::acceleration::ImageAcceleration,
+    ) -> Self {
         self.image_acceleration = Some(acceleration);
         self
     }
@@ -410,7 +410,9 @@ impl MicroVmBuilder {
     /// and spawns the microVM runner subprocess.
     pub async fn run(self) -> Result<MicroVm> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let data_dir = self.data_dir.unwrap_or_else(|| PathBuf::from(home).join(".cache/krun-microvm"));
+        let data_dir = self
+            .data_dir
+            .unwrap_or_else(|| PathBuf::from(home).join(".cache/krun-microvm"));
 
         // 1. Run Preflight checks if enabled
         if self.perform_preflight {
@@ -445,13 +447,21 @@ impl MicroVmBuilder {
                 crate::oci::OciLayout::load(layout_path, Some(&reference.tag), &data_dir)?
             } else {
                 let oci_client = OciClient::new();
-                tracing::info!("Ensuring image '{}' is ready...", reference.canonical_name());
+                tracing::info!(
+                    "Ensuring image '{}' is ready...",
+                    reference.canonical_name()
+                );
                 oci_client.pull_and_unpack(&reference, &data_dir).await?
             }
         };
 
         // 3. Create unique instance directory & CoW clone rootfs
-        let instance_id = format!("vm-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis());
+        let instance_id = format!(
+            "vm-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+        );
         let instance_dir = data_dir.join("instances").join(&instance_id);
         let instance_rootfs = instance_dir.join("rootfs");
 
@@ -508,7 +518,10 @@ impl MicroVmBuilder {
         };
 
         let final_console_log = if self.detach {
-            Some(self.console_log_path.unwrap_or_else(|| instance_dir.join("console.log")))
+            Some(
+                self.console_log_path
+                    .unwrap_or_else(|| instance_dir.join("console.log")),
+            )
         } else {
             self.console_log_path
         };
@@ -519,7 +532,10 @@ impl MicroVmBuilder {
             let oci_client = OciClient::new();
             for art in &self.artifacts {
                 let art_ref = ImageReference::parse(&art.reference)?;
-                tracing::info!("Ensuring OCI artifact '{}' is ready...", art_ref.canonical_name());
+                tracing::info!(
+                    "Ensuring OCI artifact '{}' is ready...",
+                    art_ref.canonical_name()
+                );
                 let art_path = oci_client.pull_artifact(&art_ref, &data_dir).await?;
                 final_virtiofs_mounts.push(VirtioFsMount::new(
                     art.tag.clone(),
@@ -532,9 +548,17 @@ impl MicroVmBuilder {
         // 5c. Setup any requested CoW workspaces (APFS clonefile / FICLONE snapshot)
         for ws in &self.cow_workspaces {
             let cow_dir = instance_dir.join("workspaces").join(&ws.tag);
-            tracing::info!("Creating CoW workspace snapshot for '{}' at {}...", ws.tag, cow_dir.display());
-            clone_rootfs(&ws.host_path, &cow_dir)
-                .with_context(|| format!("Failed to create CoW workspace snapshot for '{}'", ws.host_path.display()))?;
+            tracing::info!(
+                "Creating CoW workspace snapshot for '{}' at {}...",
+                ws.tag,
+                cow_dir.display()
+            );
+            clone_rootfs(&ws.host_path, &cow_dir).with_context(|| {
+                format!(
+                    "Failed to create CoW workspace snapshot for '{}'",
+                    ws.host_path.display()
+                )
+            })?;
             final_virtiofs_mounts.push(VirtioFsMount::new(
                 ws.tag.clone(),
                 cow_dir,
@@ -545,7 +569,10 @@ impl MicroVmBuilder {
         // 5c-2. Attach accelerated Nydus chunk blob cache directory if lazy loading is enabled
         if let Some(ref acc) = self.image_acceleration {
             if acc.lazy_load {
-                let cache_dir = acc.chunk_cache_dir.clone().unwrap_or_else(|| data_dir.join("nydus-cache"));
+                let cache_dir = acc
+                    .chunk_cache_dir
+                    .clone()
+                    .unwrap_or_else(|| data_dir.join("nydus-cache"));
                 let _ = fs::create_dir_all(&cache_dir);
                 tracing::info!(
                     "Configuring accelerated chunk cache at {} (format: {:?})...",
@@ -574,7 +601,11 @@ impl MicroVmBuilder {
                 guest_hostname,
                 nameservers
             );
-            crate::net::DnsConfig::write_network_files(&instance_rootfs, &guest_hostname, &nameservers)?;
+            crate::net::DnsConfig::write_network_files(
+                &instance_rootfs,
+                &guest_hostname,
+                &nameservers,
+            )?;
         } else {
             // In air-gapped mode, write loopback only
             crate::net::DnsConfig::write_network_files(&instance_rootfs, &guest_hostname, &[])?;
@@ -606,7 +637,8 @@ impl MicroVmBuilder {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&runner_cfg_path, std::fs::Permissions::from_mode(0o600));
+            let _ =
+                std::fs::set_permissions(&runner_cfg_path, std::fs::Permissions::from_mode(0o600));
         }
 
         tracing::info!("Spawning microvm runner (PID isolated)...");
@@ -652,9 +684,9 @@ impl MicroVmBuilder {
             None
         };
 
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("Failed to spawn runner binary {}", runner_binary.display()))?;
+        let child = cmd.spawn().with_context(|| {
+            format!("Failed to spawn runner binary {}", runner_binary.display())
+        })?;
 
         let pid = child.id().unwrap_or(0);
         let now = std::time::SystemTime::now()
@@ -707,10 +739,7 @@ impl MicroVm {
     }
 
     pub fn is_alive(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(None) => true,
-            _ => false,
-        }
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Asynchronously waits for the microVM to exit and cleans up ephemeral state.
@@ -943,7 +972,9 @@ mod tests {
             .unwrap()
             .chunk_cache_dir("/var/cache/nydus");
 
-        let acc = builder.get_image_acceleration().expect("Expected image acceleration");
+        let acc = builder
+            .get_image_acceleration()
+            .expect("Expected image acceleration");
         assert!(acc.lazy_load);
         assert_eq!(acc.chunk_size_bytes, Some(64 * 1024 * 1024));
         assert_eq!(acc.chunk_cache_dir, Some(PathBuf::from("/var/cache/nydus")));
@@ -963,4 +994,3 @@ mod tests {
         assert_eq!(builder.dax_window_size, Some(4 * 1024 * 1024 * 1024));
     }
 }
-

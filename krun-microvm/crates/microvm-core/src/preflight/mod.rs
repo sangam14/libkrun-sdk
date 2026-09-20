@@ -33,7 +33,11 @@ impl Preflight {
                 passed: true,
                 message: format!(
                     "Hypervisor.framework available (nested virt: {})",
-                    if nested { "enabled" } else { "disabled/unsupported" }
+                    if nested {
+                        "enabled"
+                    } else {
+                        "disabled/unsupported"
+                    }
                 ),
             }
         }
@@ -45,10 +49,15 @@ impl Preflight {
                 CheckResult {
                     name: "Virtualization Support (Linux KVM)".to_string(),
                     passed: false,
-                    message: "/dev/kvm device does not exist. Enable KVM in BIOS or kernel.".to_string(),
+                    message: "/dev/kvm device does not exist. Enable KVM in BIOS or kernel."
+                        .to_string(),
                 }
             } else {
-                match std::fs::OpenOptions::new().read(true).write(true).open(kvm_path) {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(kvm_path)
+                {
                     Ok(_) => CheckResult {
                         name: "Virtualization Support (Linux KVM)".to_string(),
                         passed: true,
@@ -57,7 +66,9 @@ impl Preflight {
                     Err(e) => CheckResult {
                         name: "Virtualization Support (Linux KVM)".to_string(),
                         passed: false,
-                        message: format!("Cannot open /dev/kvm: {e}. Check user groups (e.g. kvm)."),
+                        message: format!(
+                            "Cannot open /dev/kvm: {e}. Check user groups (e.g. kvm)."
+                        ),
                     },
                 }
             }

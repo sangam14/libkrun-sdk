@@ -45,7 +45,9 @@ pub fn build_cgroups_metrics(stats: &ProcessStats) -> Metrics {
 }
 
 /// Serializes cgroups Metrics into a `google.protobuf.Any` well-known type.
-pub fn encode_metrics_any(metrics: &Metrics) -> Result<containerd_shim_protos::protobuf::well_known_types::any::Any, String> {
+pub fn encode_metrics_any(
+    metrics: &Metrics,
+) -> Result<containerd_shim_protos::protobuf::well_known_types::any::Any, String> {
     let bytes = metrics.write_to_bytes().map_err(|e| e.to_string())?;
     let mut any = containerd_shim_protos::protobuf::well_known_types::any::Any::new();
     any.type_url = "io.containerd.cgroups.v1.Metrics".to_string();

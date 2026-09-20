@@ -92,7 +92,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::FileTypeExt;
-                if file_type.is_fifo() || file_type.is_socket() || file_type.is_char_device() || file_type.is_block_device() {
+                if file_type.is_fifo()
+                    || file_type.is_socket()
+                    || file_type.is_char_device()
+                    || file_type.is_block_device()
+                {
                     continue;
                 }
             }

@@ -51,8 +51,8 @@ impl OciLayout {
 
         let index_data = fs::read_to_string(&index_file)
             .with_context(|| format!("Failed to read index.json at {}", index_file.display()))?;
-        let index: OciIndex = serde_json::from_str(&index_data)
-            .context("Failed to parse OCI layout index.json")?;
+        let index: OciIndex =
+            serde_json::from_str(&index_data).context("Failed to parse OCI layout index.json")?;
 
         if index.manifests.is_empty() {
             bail!("OCI layout index.json has no manifests");
@@ -64,9 +64,9 @@ impl OciLayout {
                 .manifests
                 .iter()
                 .find(|m| {
-                    m.annotations.as_ref().map_or(false, |a| {
+                    m.annotations.as_ref().is_some_and(|a| {
                         a.get("org.opencontainers.image.ref.name")
-                            .map_or(false, |v| v == target_tag)
+                            .is_some_and(|v| v == target_tag)
                     })
                 })
                 .unwrap_or(&index.manifests[0])
@@ -79,10 +79,7 @@ impl OciLayout {
             .strip_prefix("sha256:")
             .unwrap_or(&manifest_desc.digest);
 
-        let manifest_blob_path = layout_dir
-            .join("blobs")
-            .join("sha256")
-            .join(manifest_hash);
+        let manifest_blob_path = layout_dir.join("blobs").join("sha256").join(manifest_hash);
 
         if !manifest_blob_path.exists() {
             bail!(
@@ -105,7 +102,10 @@ impl OciLayout {
         if rootfs_dir.exists() && config_file.exists() {
             let config_data = fs::read_to_string(&config_file)?;
             if let Ok(cfg) = serde_json::from_str::<OciConfig>(&config_data) {
-                tracing::info!("RootFS cache hit for OCI layout manifest {}", manifest_desc.digest);
+                tracing::info!(
+                    "RootFS cache hit for OCI layout manifest {}",
+                    manifest_desc.digest
+                );
                 return Ok((rootfs_dir, cfg));
             }
         }
@@ -126,7 +126,9 @@ impl OciLayout {
             OciConfig {
                 entrypoint: Vec::new(),
                 cmd: vec!["/bin/sh".to_string()],
-                env: vec!["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()],
+                env: vec![
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                ],
                 working_dir: Some("/".to_string()),
                 user: None,
             }
@@ -162,7 +164,7 @@ impl OciLayout {
             let is_gz = layer
                 .media_type
                 .as_ref()
-                .map_or(true, |m| m.contains("gzip") || m.ends_with(".tar+gzip"));
+                .is_none_or(|m| m.contains("gzip") || m.ends_with(".tar+gzip"));
 
             extract_layer(cursor, &staging_rootfs, is_gz)?;
         }

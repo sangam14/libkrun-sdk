@@ -1,7 +1,7 @@
-use std::process::ExitCode;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use krun_sys::KrunContext;
 use microvm_core::types::RunnerConfig;
+use std::process::ExitCode;
 
 fn validate_config(cfg: &RunnerConfig) -> Result<()> {
     if !cfg.root_path.exists() {
@@ -119,7 +119,10 @@ fn main() -> ExitCode {
         match std::fs::read_to_string(&args[2]) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("Error: Failed to read runner config file '{}': {e}", args[2]);
+                eprintln!(
+                    "Error: Failed to read runner config file '{}': {e}",
+                    args[2]
+                );
                 return ExitCode::from(125);
             }
         }
@@ -127,7 +130,10 @@ fn main() -> ExitCode {
         match std::fs::read_to_string(&args[1]) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("Error: Failed to read runner config file '{}': {e}", args[1]);
+                eprintln!(
+                    "Error: Failed to read runner config file '{}': {e}",
+                    args[1]
+                );
                 return ExitCode::from(125);
             }
         }

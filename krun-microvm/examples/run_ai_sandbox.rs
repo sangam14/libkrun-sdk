@@ -14,7 +14,10 @@ async fn main() -> Result<()> {
         "print('Hello from original host workspace!')\n",
     )?;
 
-    println!("🧪 Host workspace prepared at: {}", sample_project.display());
+    println!(
+        "🧪 Host workspace prepared at: {}",
+        sample_project.display()
+    );
     println!("🚀 Launching MicroVM with APFS/FICLONE CoW sandboxing and artifact mounting...");
 
     // 2. Launch microVM with workspace CoW snapshot and artifact mounting
@@ -33,7 +36,8 @@ async fn main() -> Result<()> {
              cat /workspace/main.py && \
              echo '# Host file modified inside sandbox!' >> /workspace/main.py && \
              echo 'Modified guest workspace content:' && \
-             cat /workspace/main.py".to_string(),
+             cat /workspace/main.py"
+                .to_string(),
         ])
         .run()
         .await?;
@@ -45,7 +49,10 @@ async fn main() -> Result<()> {
     // 3. Verify host file was untouched thanks to CoW isolation
     let host_content = fs::read_to_string(sample_project.join("main.py"))?;
     println!("\n🔍 Verifying host workspace integrity:");
-    println!("Host content after guest mutation:\n{}", host_content.trim());
+    println!(
+        "Host content after guest mutation:\n{}",
+        host_content.trim()
+    );
     assert!(
         !host_content.contains("Host file modified inside sandbox!"),
         "Host workspace should remain completely unaltered!"

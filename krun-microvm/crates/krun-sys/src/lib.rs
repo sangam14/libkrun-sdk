@@ -141,6 +141,57 @@ impl KrunContext {
         Ok(())
     }
 
+    pub fn set_exec(
+        &mut self,
+        exec_path: &str,
+        argv: &[String],
+        envp: &[String],
+    ) -> Result<(), KrunError> {
+        let c_exec = CString::new(exec_path)?;
+
+        let mut c_argv = Vec::new();
+        for arg in argv {
+            c_argv.push(CString::new(arg.as_str())?);
+        }
+        let mut argv_ptrs: Vec<*const c_char> = c_argv.iter().map(|s| s.as_ptr()).collect();
+        argv_ptrs.push(std::ptr::null());
+
+        let mut c_envp = Vec::new();
+        for env in envp {
+            c_envp.push(CString::new(env.as_str())?);
+        }
+        let mut envp_ptrs: Vec<*const c_char> = c_envp.iter().map(|s| s.as_ptr()).collect();
+        envp_ptrs.push(std::ptr::null());
+
+        let rc = unsafe {
+            ffi::krun_set_exec(
+                self.ctx_id,
+                c_exec.as_ptr(),
+                argv_ptrs.as_ptr(),
+                envp_ptrs.as_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::SetExec(rc));
+        }
+        Ok(())
+    }
+
+    pub fn set_env(&mut self, envp: &[String]) -> Result<(), KrunError> {
+        let mut c_envp = Vec::new();
+        for env in envp {
+            c_envp.push(CString::new(env.as_str())?);
+        }
+        let mut envp_ptrs: Vec<*const c_char> = c_envp.iter().map(|s| s.as_ptr()).collect();
+        envp_ptrs.push(std::ptr::null());
+
+        let rc = unsafe { ffi::krun_set_env(self.ctx_id, envp_ptrs.as_ptr()) };
+        if rc != 0 {
+            return Err(KrunError::SetEnv(rc));
+        }
+        Ok(())
+    }
+
     pub fn set_rlimits(&mut self, rlimits: &str) -> Result<(), KrunError> {
         let c_rlimits = CString::new(rlimits)?;
         let rc = unsafe { ffi::krun_set_rlimits(self.ctx_id, c_rlimits.as_ptr()) };
@@ -201,10 +252,7 @@ impl KrunContext {
         socket_path: Option<&str>,
         fd: Option<i32>,
     ) -> Result<(), KrunError> {
-        let c_path = match socket_path {
-            Some(s) => Some(CString::new(s)?),
-            None => None,
-        };
+        let c_path = socket_path.map(CString::new).transpose()?;
         let p_path = c_path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
         let raw_fd = fd.unwrap_or(-1);
 
@@ -224,11 +272,7 @@ impl KrunContext {
         Ok(())
     }
 
-    pub fn add_vsock_port<P: AsRef<Path>>(
-        &mut self,
-        port: u32,
-        path: P,
-    ) -> Result<(), KrunError> {
+    pub fn add_vsock_port<P: AsRef<Path>>(&mut self, port: u32, path: P) -> Result<(), KrunError> {
         let path_str = path.as_ref().to_string_lossy();
         let c_path = CString::new(path_str.as_bytes())?;
         let rc = unsafe { ffi::krun_add_vsock_port(self.ctx_id, port, c_path.as_ptr()) };

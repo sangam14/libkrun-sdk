@@ -37,7 +37,7 @@ impl OciArtifact {
                 }
             }
         }
-        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         Ok(list)
     }
 }
@@ -86,11 +86,14 @@ pub(crate) async fn pull_artifact_impl(
                 let is_tar = layer
                     .media_type
                     .as_ref()
-                    .map_or(false, |m| m.contains("tar") || m.contains("layer"));
+                    .is_some_and(|m| m.contains("tar") || m.contains("layer"));
                 if is_tar {
                     format!("layer_{}.tar", i)
                 } else {
-                    let hash_part = layer.digest.strip_prefix("sha256:").unwrap_or(&layer.digest);
+                    let hash_part = layer
+                        .digest
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&layer.digest);
                     let short_hash = &hash_part[..hash_part.len().min(12)];
                     format!("blob_{}.bin", short_hash)
                 }
@@ -106,10 +109,7 @@ pub(crate) async fn pull_artifact_impl(
             .fetch_blob_bytes(reference, &layer.digest, token_ref)
             .await?;
 
-        let is_tar = layer
-            .media_type
-            .as_ref()
-            .map_or(false, |m| m.contains("tar"))
+        let is_tar = layer.media_type.as_ref().is_some_and(|m| m.contains("tar"))
             || filename.ends_with(".tar")
             || filename.ends_with(".tar.gz");
 
@@ -119,7 +119,7 @@ pub(crate) async fn pull_artifact_impl(
             let is_gz = layer
                 .media_type
                 .as_ref()
-                .map_or(false, |m| m.contains("gzip"))
+                .is_some_and(|m| m.contains("gzip"))
                 || filename.ends_with(".tar.gz");
             extract_layer(cursor, &artifact_dir, is_gz)?;
             saved_files.push(format!("{}/ (unpacked)", filename));

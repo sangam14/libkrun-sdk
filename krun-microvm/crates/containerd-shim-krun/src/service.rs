@@ -142,11 +142,7 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
-    async fn start(
-        &self,
-        _ctx: &TtrpcContext,
-        req: StartRequest,
-    ) -> ttrpc::Result<StartResponse> {
+    async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> ttrpc::Result<StartResponse> {
         let mut instances = self.instances.lock().await;
         let instance = instances.get_mut(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -161,11 +157,7 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
-    async fn state(
-        &self,
-        _ctx: &TtrpcContext,
-        req: StateRequest,
-    ) -> ttrpc::Result<StateResponse> {
+    async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> ttrpc::Result<StateResponse> {
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -174,7 +166,7 @@ impl Task for KrunTask {
             ))
         })?;
 
-        let is_alive = unsafe { libc::kill(instance.pid as i32, 0) == 0 };
+        let is_alive = signal::kill(Pid::from_raw(instance.pid as i32), None).is_ok();
         let status = if is_alive {
             instance.status
         } else {
@@ -236,7 +228,7 @@ impl Task for KrunTask {
                 Err(_) => 137,
             }
         } else {
-            while unsafe { libc::kill(pid as i32, 0) == 0 } {
+            while signal::kill(Pid::from_raw(pid as i32), None).is_ok() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
             0
@@ -293,11 +285,7 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
-    async fn pids(
-        &self,
-        _ctx: &TtrpcContext,
-        req: PidsRequest,
-    ) -> ttrpc::Result<PidsResponse> {
+    async fn pids(&self, _ctx: &TtrpcContext, req: PidsRequest) -> ttrpc::Result<PidsResponse> {
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -313,11 +301,7 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
-    async fn stats(
-        &self,
-        _ctx: &TtrpcContext,
-        req: StatsRequest,
-    ) -> ttrpc::Result<StatsResponse> {
+    async fn stats(&self, _ctx: &TtrpcContext, req: StatsRequest) -> ttrpc::Result<StatsResponse> {
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -341,11 +325,7 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
-    async fn shutdown(
-        &self,
-        _ctx: &TtrpcContext,
-        _req: ShutdownRequest,
-    ) -> ttrpc::Result<Empty> {
+    async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> ttrpc::Result<Empty> {
         self.exit.signal();
         Ok(Empty::new())
     }
@@ -404,7 +384,10 @@ async fn stream_console_to_fifos(
             Ok(f) => break Some(f),
             Err(_) => {
                 if wait_start.elapsed() > tokio::time::Duration::from_secs(5) {
-                    tracing::warn!("Timed out waiting for console log file at {}", log_path.display());
+                    tracing::warn!(
+                        "Timed out waiting for console log file at {}",
+                        log_path.display()
+                    );
                     break None;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -431,7 +414,7 @@ async fn stream_console_to_fifos(
                 }
             }
             Ok(_) => {
-                let is_alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+                let is_alive = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
                 if !is_alive {
                     if let Ok(remaining) = log_file.read(&mut buf).await {
                         if remaining > 0 {

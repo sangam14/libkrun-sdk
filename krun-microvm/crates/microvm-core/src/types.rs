@@ -90,4 +90,3 @@ pub struct RunnerConfig {
     #[serde(default)]
     pub image_acceleration: Option<crate::acceleration::ImageAcceleration>,
 }
-

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use microvm_core::{
     collect_process_stats, ImageReference, MicroVmBuilder, OciArtifact, OciClient, OciLayout,
     Preflight, StateManager, VmStatus,
@@ -15,118 +15,121 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct RunArgs {
+    /// OCI image reference (e.g. alpine:latest, ubuntu:22.04) or empty if --bundle is used
+    #[arg(default_value = "")]
+    pub image: String,
+
+    /// Path to an unpacked OCI runtime bundle (containing config.json and rootfs/)
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Number of virtual CPUs
+    #[arg(short = 'c', long, default_value_t = 2)]
+    pub cpus: u8,
+
+    /// RAM in MiB
+    #[arg(short = 'm', long, default_value_t = 512)]
+    pub memory: u32,
+
+    /// Port forwarding rules in host:guest format (e.g. 8080:80)
+    #[arg(short = 'p', long = "port")]
+    pub ports: Vec<String>,
+
+    /// Mount host directory via VirtioFS: <host_path>:<tag>[:ro]
+    #[arg(short = 'v', long = "volume")]
+    pub volumes: Vec<String>,
+
+    /// Attach an OCI artifact (models, datasets, blobs) via VirtioFS: <reference>:<tag>[:ro]
+    #[arg(long = "artifact")]
+    pub artifacts: Vec<String>,
+
+    /// Mount an isolated Copy-on-Write (CoW) sandbox of a host directory: <host_path>:<tag>
+    #[arg(long = "workspace-cow")]
+    pub workspace_cow: Vec<String>,
+
+    /// Environment variables (KEY=VALUE)
+    #[arg(short = 'e', long = "env")]
+    pub env: Vec<String>,
+
+    /// Working directory inside guest
+    #[arg(short = 'w', long)]
+    pub workdir: Option<String>,
+
+    /// Custom data cache directory
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+
+    /// Skip preflight virtualization checks
+    #[arg(long)]
+    pub no_preflight: bool,
+
+    /// libkrun log level (0=Off, 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Trace)
+    #[arg(long)]
+    pub log_level: Option<u32>,
+
+    /// Keep STDIN open even if not attached
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// Allocate a pseudo-TTY
+    #[arg(short = 't', long)]
+    pub tty: bool,
+
+    /// Run container in background and print container ID
+    #[arg(short = 'd', long)]
+    pub detach: bool,
+
+    /// Completely isolate guest without network interfaces
+    #[arg(long)]
+    pub no_network: bool,
+
+    /// Network mode: tsi (default), none (air-gapped), or unix:<socket_path>
+    #[arg(long, default_value = "tsi")]
+    pub net: String,
+
+    /// Custom DNS nameservers (e.g. 8.8.8.8,1.1.1.1; defaults to autonomous resilient fallback)
+    #[arg(long = "dns")]
+    pub dns: Vec<String>,
+
+    /// Custom guest hostname (defaults to microVM instance ID)
+    #[arg(long)]
+    pub hostname: Option<String>,
+
+    /// Guest resource limits (e.g. RLIMIT_NOFILE=1024:2048)
+    #[arg(long)]
+    pub rlimits: Option<String>,
+
+    /// VirtioFS DAX (Direct Access) shared memory window size (e.g. 4G, 512M)
+    #[arg(long)]
+    pub dax: Option<String>,
+
+    /// Enable Dragonfly Nydus RAFSv6 instant on-demand lazy loading
+    #[arg(long = "lazy-load")]
+    pub lazy_load: bool,
+
+    /// Path to local RAFSv6 / EROFS metadata bootstrap image
+    #[arg(long = "nydus-bootstrap")]
+    pub nydus_bootstrap: Option<PathBuf>,
+
+    /// Directory for caching downloaded Nydus chunk blobs
+    #[arg(long = "nydus-cache")]
+    pub nydus_cache: Option<PathBuf>,
+
+    /// Chunk or macro-chunk size for streaming (e.g. 4M, 64M)
+    #[arg(long = "chunk-size")]
+    pub chunk_size: Option<String>,
+
+    /// Optional command to override ENTRYPOINT/CMD
+    #[arg(last = true)]
+    pub cmd: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Run an OCI container image as a microVM
-    Run {
-        /// OCI image reference (e.g. alpine:latest, ubuntu:22.04) or empty if --bundle is used
-        #[arg(default_value = "")]
-        image: String,
-
-        /// Path to an unpacked OCI runtime bundle (containing config.json and rootfs/)
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-
-        /// Number of virtual CPUs
-        #[arg(short = 'c', long, default_value_t = 2)]
-        cpus: u8,
-
-        /// RAM in MiB
-        #[arg(short = 'm', long, default_value_t = 512)]
-        memory: u32,
-
-        /// Port forwarding rules in host:guest format (e.g. 8080:80)
-        #[arg(short = 'p', long = "port")]
-        ports: Vec<String>,
-
-        /// Mount host directory via VirtioFS: <host_path>:<tag>[:ro]
-        #[arg(short = 'v', long = "volume")]
-        volumes: Vec<String>,
-
-        /// Attach an OCI artifact (models, datasets, blobs) via VirtioFS: <reference>:<tag>[:ro]
-        #[arg(long = "artifact")]
-        artifacts: Vec<String>,
-
-        /// Mount an isolated Copy-on-Write (CoW) sandbox of a host directory: <host_path>:<tag>
-        #[arg(long = "workspace-cow")]
-        workspace_cow: Vec<String>,
-
-        /// Environment variables (KEY=VALUE)
-        #[arg(short = 'e', long = "env")]
-        env: Vec<String>,
-
-        /// Working directory inside guest
-        #[arg(short = 'w', long)]
-        workdir: Option<String>,
-
-        /// Custom data cache directory
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-
-        /// Skip preflight virtualization checks
-        #[arg(long)]
-        no_preflight: bool,
-
-        /// libkrun log level (0=Off, 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Trace)
-        #[arg(long)]
-        log_level: Option<u32>,
-
-        /// Keep STDIN open even if not attached
-        #[arg(short = 'i', long)]
-        interactive: bool,
-
-        /// Allocate a pseudo-TTY
-        #[arg(short = 't', long)]
-        tty: bool,
-
-        /// Run container in background and print container ID
-        #[arg(short = 'd', long)]
-        detach: bool,
-
-        /// Completely isolate guest without network interfaces
-        #[arg(long)]
-        no_network: bool,
-
-        /// Network mode: tsi (default), none (air-gapped), or unix:<socket_path>
-        #[arg(long, default_value = "tsi")]
-        net: String,
-
-        /// Custom DNS nameservers (e.g. 8.8.8.8,1.1.1.1; defaults to autonomous resilient fallback)
-        #[arg(long = "dns")]
-        dns: Vec<String>,
-
-        /// Custom guest hostname (defaults to microVM instance ID)
-        #[arg(long)]
-        hostname: Option<String>,
-
-        /// Guest resource limits (e.g. RLIMIT_NOFILE=1024:2048)
-        #[arg(long)]
-        rlimits: Option<String>,
-
-        /// VirtioFS DAX (Direct Access) shared memory window size (e.g. 4G, 512M)
-        #[arg(long)]
-        dax: Option<String>,
-
-        /// Enable Dragonfly Nydus RAFSv6 instant on-demand lazy loading
-        #[arg(long = "lazy-load")]
-        lazy_load: bool,
-
-        /// Path to local RAFSv6 / EROFS metadata bootstrap image
-        #[arg(long = "nydus-bootstrap")]
-        nydus_bootstrap: Option<PathBuf>,
-
-        /// Directory for caching downloaded Nydus chunk blobs
-        #[arg(long = "nydus-cache")]
-        nydus_cache: Option<PathBuf>,
-
-        /// Chunk or macro-chunk size for streaming (e.g. 4M, 64M)
-        #[arg(long = "chunk-size")]
-        chunk_size: Option<String>,
-
-        /// Optional command to override ENTRYPOINT/CMD
-        #[arg(last = true)]
-        cmd: Vec<String>,
-    },
+    Run(Box<RunArgs>),
 
     /// List running and recent microVMs
     Ps {
@@ -321,35 +324,36 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Run {
-            image,
-            bundle,
-            cpus,
-            memory,
-            ports,
-            volumes,
-            artifacts,
-            workspace_cow,
-            env,
-            workdir,
-            data_dir,
-            no_preflight,
-            log_level,
-            interactive,
-            tty,
-            detach,
-            no_network,
-            net,
-            dns,
-            hostname,
-            rlimits,
-            dax,
-            lazy_load,
-            nydus_bootstrap,
-            nydus_cache,
-            chunk_size,
-            cmd,
-        } => {
+        Commands::Run(run) => {
+            let RunArgs {
+                image,
+                bundle,
+                cpus,
+                memory,
+                ports,
+                volumes,
+                artifacts,
+                workspace_cow,
+                env,
+                workdir,
+                data_dir,
+                no_preflight,
+                log_level,
+                interactive,
+                tty,
+                detach,
+                no_network,
+                net,
+                dns,
+                hostname,
+                rlimits,
+                dax,
+                lazy_load,
+                nydus_bootstrap,
+                nydus_cache,
+                chunk_size,
+                cmd,
+            } = *run;
             let mut builder = if let Some(ref b) = bundle {
                 if !detach {
                     println!("📦 Loading MicroVM from OCI bundle: {}", b.display());
@@ -409,7 +413,9 @@ async fn main() -> Result<()> {
             if no_network || net == "none" {
                 builder = builder.network_mode(microvm_core::NetworkMode::None);
             } else if let Some(path_str) = net.strip_prefix("unix:") {
-                builder = builder.network_mode(microvm_core::NetworkMode::UnixStream(PathBuf::from(path_str)));
+                builder = builder.network_mode(microvm_core::NetworkMode::UnixStream(
+                    PathBuf::from(path_str),
+                ));
             } else {
                 builder = builder.network_mode(microvm_core::NetworkMode::Tsi);
             }
@@ -443,7 +449,7 @@ async fn main() -> Result<()> {
                 }
                 let host_path = PathBuf::from(parts[0]);
                 let tag = parts[1];
-                let ro = parts.get(2).map_or(false, |&s| s == "ro");
+                let ro = parts.get(2).is_some_and(|&s| s == "ro");
                 builder = builder.virtiofs(tag, host_path, ro);
             }
 
@@ -512,7 +518,11 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Ps { all, no_trunc, data_dir } => {
+        Commands::Ps {
+            all,
+            no_trunc,
+            data_dir,
+        } => {
             let base = data_dir.unwrap_or_else(default_data_dir);
             let vms = StateManager::list(&base)?;
 
@@ -600,11 +610,18 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Rm { id, force, data_dir } => {
+        Commands::Rm {
+            id,
+            force,
+            data_dir,
+        } => {
             let base = data_dir.unwrap_or_else(default_data_dir);
             match StateManager::delete(&base, &id, force) {
                 Ok(vm) => {
-                    println!("✅ Removed microVM '{}' (Image: {}, PID: {})", vm.id, vm.image, vm.pid);
+                    println!(
+                        "✅ Removed microVM '{}' (Image: {}, PID: {})",
+                        vm.id, vm.image, vm.pid
+                    );
                 }
                 Err(e) => {
                     bail!("Failed to remove microVM '{}': {}", id, e);
@@ -654,13 +671,28 @@ async fn main() -> Result<()> {
             } else {
                 println!("📦 MicroVM Inspection: {}", vm.id);
                 println!("{:-<60}", "");
-                println!("  Status:          {}", if is_alive { format!("● Running (PID {})", vm.pid) } else { "○ Stopped".to_string() });
+                println!(
+                    "  Status:          {}",
+                    if is_alive {
+                        format!("● Running (PID {})", vm.pid)
+                    } else {
+                        "○ Stopped".to_string()
+                    }
+                );
                 println!("  Image:           {}", vm.image);
-                println!("  Created:         {} ({})", format_duration_since(vm.created_at), vm.created_at);
+                println!(
+                    "  Created:         {} ({})",
+                    format_duration_since(vm.created_at),
+                    vm.created_at
+                );
                 println!("  Instance Path:   {}", vm.instance_dir.display());
                 println!("  Console Log:     {}", console_log.display());
                 if !vm.port_forwards.is_empty() {
-                    let ports: Vec<String> = vm.port_forwards.iter().map(|p| format!("{}:{}", p.host, p.guest)).collect();
+                    let ports: Vec<String> = vm
+                        .port_forwards
+                        .iter()
+                        .map(|p| format!("{}:{}", p.host, p.guest))
+                        .collect();
                     println!("  Port Mappings:   {}", ports.join(", "));
                 }
 
@@ -682,15 +714,25 @@ async fn main() -> Result<()> {
 
                 if let Some(ref stats) = telemetry {
                     println!("\n  Telemetry (Live):");
-                    println!("    CPU Time (Total):  {:.2} ms (User: {:.2} ms, Sys: {:.2} ms)",
+                    println!(
+                        "    CPU Time (Total):  {:.2} ms (User: {:.2} ms, Sys: {:.2} ms)",
                         stats.total_cpu_ns as f64 / 1_000_000.0,
                         stats.user_cpu_ns as f64 / 1_000_000.0,
                         stats.kernel_cpu_ns as f64 / 1_000_000.0,
                     );
-                    println!("    Memory (RSS):      {}", format_bytes(stats.memory_rss_bytes));
-                    println!("    Memory (Virtual):  {}", format_bytes(stats.memory_vsize_bytes));
+                    println!(
+                        "    Memory (RSS):      {}",
+                        format_bytes(stats.memory_rss_bytes)
+                    );
+                    println!(
+                        "    Memory (Virtual):  {}",
+                        format_bytes(stats.memory_vsize_bytes)
+                    );
                     println!("    Active Threads:    {}", stats.threads);
-                    println!("    Page Faults:       {} (Major: {})", stats.page_faults, stats.major_page_faults);
+                    println!(
+                        "    Page Faults:       {} (Major: {})",
+                        stats.page_faults, stats.major_page_faults
+                    );
                 }
             }
         }
@@ -733,7 +775,8 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let sample_interval = std::time::Duration::from_millis(if no_stream { 250 } else { 1000 });
+            let sample_interval =
+                std::time::Duration::from_millis(if no_stream { 250 } else { 1000 });
 
             loop {
                 let vms = StateManager::list(&base)?;
@@ -795,13 +838,27 @@ async fn main() -> Result<()> {
 
                 println!(
                     "{:<14} {:<24} {:<10} {:<14} {:<14} {:<8} {:<12}",
-                    "CONTAINER ID", "IMAGE", "CPU %", "MEM USAGE", "VIRTUAL MEM", "PIDS", "PAGE FAULTS"
+                    "CONTAINER ID",
+                    "IMAGE",
+                    "CPU %",
+                    "MEM USAGE",
+                    "VIRTUAL MEM",
+                    "PIDS",
+                    "PAGE FAULTS"
                 );
                 println!("{:-<100}", "");
 
                 for (vm, cpu_pct, stats) in rows {
-                    let short_id = if vm.id.len() > 12 { &vm.id[..12] } else { &vm.id };
-                    let short_img = if vm.image.len() > 23 { format!("{}...", &vm.image[..20]) } else { vm.image };
+                    let short_id = if vm.id.len() > 12 {
+                        &vm.id[..12]
+                    } else {
+                        &vm.id
+                    };
+                    let short_img = if vm.image.len() > 23 {
+                        format!("{}...", &vm.image[..20])
+                    } else {
+                        vm.image
+                    };
                     println!(
                         "{:<14} {:<24} {:<10} {:<14} {:<14} {:<8} {:<12}",
                         short_id,
@@ -838,7 +895,10 @@ async fn main() -> Result<()> {
 
             println!("Top - MicroVM {} (PID {})", vm.id, vm.pid);
             println!("{:-<75}", "");
-            println!("{:<10} {:<10} {:<16} {:<16} {:<14}", "PID", "THREADS", "USER CPU", "SYS CPU", "RSS MEMORY");
+            println!(
+                "{:<10} {:<10} {:<16} {:<16} {:<14}",
+                "PID", "THREADS", "USER CPU", "SYS CPU", "RSS MEMORY"
+            );
             println!(
                 "{:<10} {:<10} {:<16} {:<16} {:<14}",
                 vm.pid,
@@ -849,7 +909,11 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::Cp { src, dest, data_dir } => {
+        Commands::Cp {
+            src,
+            dest,
+            data_dir,
+        } => {
             let base = data_dir.unwrap_or_else(default_data_dir);
             if let Some((vm_id, guest_path)) = dest.split_once(':') {
                 let src_path = PathBuf::from(&src);
@@ -857,20 +921,32 @@ async fn main() -> Result<()> {
                     bail!("Source path does not exist: {}", src);
                 }
                 StateManager::copy_into(&base, vm_id, &src_path, guest_path)?;
-                println!("✅ Successfully copied '{}' into '{}:{}'", src, vm_id, guest_path);
+                println!(
+                    "✅ Successfully copied '{}' into '{}:{}'",
+                    src, vm_id, guest_path
+                );
             } else if let Some((vm_id, guest_path)) = src.split_once(':') {
                 let dest_path = PathBuf::from(&dest);
                 StateManager::copy_from(&base, vm_id, guest_path, &dest_path)?;
-                println!("✅ Successfully copied '{}:{}' to '{}'", vm_id, guest_path, dest);
+                println!(
+                    "✅ Successfully copied '{}:{}' to '{}'",
+                    vm_id, guest_path, dest
+                );
             } else {
                 bail!("Invalid cp syntax. Usage:\n  microvm cp <src_host> <vm_id>:<dest_guest>\n  microvm cp <vm_id>:<src_guest> <dest_host>");
             }
         }
 
-        Commands::Logs { id, follow, data_dir } => {
+        Commands::Logs {
+            id,
+            follow,
+            data_dir,
+        } => {
             let base = data_dir.unwrap_or_else(default_data_dir);
             let vms = StateManager::list(&base)?;
-            let target = vms.iter().find(|v| v.id == id || v.id.starts_with(&id) || v.pid.to_string() == id);
+            let target = vms
+                .iter()
+                .find(|v| v.id == id || v.id.starts_with(&id) || v.pid.to_string() == id);
 
             let vm = match target {
                 Some(v) => v,
@@ -901,7 +977,10 @@ async fn main() -> Result<()> {
                             break f;
                         }
                         if start.elapsed() > std::time::Duration::from_secs(5) {
-                            bail!("Log file '{}' was not created after 5 seconds", log_file.display());
+                            bail!(
+                                "Log file '{}' was not created after 5 seconds",
+                                log_file.display()
+                            );
                         }
                     }
                 }
@@ -957,8 +1036,12 @@ async fn main() -> Result<()> {
             let reference = ImageReference::parse(&image)?;
             let (rootfs, config) = if reference.is_local_layout {
                 let layout_path = reference.layout_path.as_ref().unwrap();
-                println!("📂 Loading local OCI image layout from '{}'...", layout_path.display());
-                let (rootfs, config) = OciLayout::load(layout_path, Some(&reference.tag), &cache_base)?;
+                println!(
+                    "📂 Loading local OCI image layout from '{}'...",
+                    layout_path.display()
+                );
+                let (rootfs, config) =
+                    OciLayout::load(layout_path, Some(&reference.tag), &cache_base)?;
                 println!("✅ Offline OCI layout loaded and unpacked!");
                 (rootfs, config)
             } else {
@@ -991,7 +1074,9 @@ async fn main() -> Result<()> {
             if all_ok {
                 println!("\n🎉 System is fully ready to run hardware-isolated microVMs!");
             } else {
-                println!("\n⚠️ Some preflight checks failed. Please address them before running VMs.");
+                println!(
+                    "\n⚠️ Some preflight checks failed. Please address them before running VMs."
+                );
             }
         }
 
@@ -1029,7 +1114,11 @@ async fn main() -> Result<()> {
             println!("Host Memory:             {}", mem_str);
             println!("Data Cache Root:         {}", base.display());
             println!("--------------------------------------------------");
-            println!("Active MicroVMs:         {} running ({} total)", running_count, vms.len());
+            println!(
+                "Active MicroVMs:         {} running ({} total)",
+                running_count,
+                vms.len()
+            );
             println!("  - Running:             {}", running_count);
             println!("  - Stopped:             {}", stopped_count);
             println!("Disk Utilization:");
@@ -1069,9 +1158,13 @@ async fn main() -> Result<()> {
                     } else {
                         a.digest.clone()
                     };
-                    let time_str = match std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(a.created_at)) {
+                    let time_str = match std::time::UNIX_EPOCH
+                        .checked_add(std::time::Duration::from_secs(a.created_at))
+                    {
                         Some(t) => {
-                            let dur = std::time::SystemTime::now().duration_since(t).unwrap_or_default();
+                            let dur = std::time::SystemTime::now()
+                                .duration_since(t)
+                                .unwrap_or_default();
                             if dur.as_secs() < 60 {
                                 format!("{}s ago", dur.as_secs())
                             } else if dur.as_secs() < 3600 {
@@ -1176,15 +1269,10 @@ mod tests {
         ];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
-            Commands::Run {
-                artifacts,
-                workspace_cow,
-                image,
-                ..
-            } => {
-                assert_eq!(artifacts, vec!["ghcr.io/owner/model:v1:weights:ro"]);
-                assert_eq!(workspace_cow, vec!["/tmp/test-project:workspace"]);
-                assert_eq!(image, "alpine:latest");
+            Commands::Run(run) => {
+                assert_eq!(run.artifacts, vec!["ghcr.io/owner/model:v1:weights:ro"]);
+                assert_eq!(run.workspace_cow, vec!["/tmp/test-project:workspace"]);
+                assert_eq!(run.image, "alpine:latest");
             }
             _ => panic!("Expected Commands::Run"),
         }
@@ -1218,7 +1306,12 @@ mod tests {
         let stats_args = vec!["microvm", "stats", "--no-stream", "--json"];
         let cli = Cli::try_parse_from(stats_args).unwrap();
         match cli.command {
-            Commands::Stats { id, no_stream, json, .. } => {
+            Commands::Stats {
+                id,
+                no_stream,
+                json,
+                ..
+            } => {
                 assert!(id.is_none());
                 assert!(no_stream);
                 assert!(json);
@@ -1293,9 +1386,9 @@ mod tests {
         let run_args = vec!["microvm", "run", "--dax", "4G", "alpine:latest"];
         let cli = Cli::try_parse_from(run_args).unwrap();
         match cli.command {
-            Commands::Run { dax, image, .. } => {
-                assert_eq!(image, "alpine:latest");
-                assert_eq!(dax.as_deref(), Some("4G"));
+            Commands::Run(run) => {
+                assert_eq!(run.image, "alpine:latest");
+                assert_eq!(run.dax.as_deref(), Some("4G"));
             }
             _ => panic!("Expected Commands::Run with --dax"),
         }
@@ -1319,21 +1412,16 @@ mod tests {
         ];
         let cli = Cli::try_parse_from(run_args).unwrap();
         match cli.command {
-            Commands::Run {
-                lazy_load,
-                nydus_bootstrap,
-                nydus_cache,
-                chunk_size,
-                dax,
-                image,
-                ..
-            } => {
-                assert!(lazy_load);
-                assert_eq!(nydus_bootstrap, Some(PathBuf::from("/tmp/bootstrap.rafs")));
-                assert_eq!(nydus_cache, Some(PathBuf::from("/var/cache/nydus")));
-                assert_eq!(chunk_size.as_deref(), Some("64M"));
-                assert_eq!(dax.as_deref(), Some("2G"));
-                assert_eq!(image, "alpine:latest");
+            Commands::Run(run) => {
+                assert!(run.lazy_load);
+                assert_eq!(
+                    run.nydus_bootstrap,
+                    Some(PathBuf::from("/tmp/bootstrap.rafs"))
+                );
+                assert_eq!(run.nydus_cache, Some(PathBuf::from("/var/cache/nydus")));
+                assert_eq!(run.chunk_size.as_deref(), Some("64M"));
+                assert_eq!(run.dax.as_deref(), Some("2G"));
+                assert_eq!(run.image, "alpine:latest");
             }
             _ => panic!("Expected Commands::Run with --lazy-load"),
         }

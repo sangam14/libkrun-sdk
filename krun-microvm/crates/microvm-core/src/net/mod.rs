@@ -7,21 +7,16 @@ use std::path::{Path, PathBuf};
 pub use crate::types::PortForward;
 
 /// Network mode for the microVM provider abstraction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NetworkMode {
     /// In-process Transparent Socket Impersonation (TSI) built into libkrun.
     /// Exposes ports according to the port map without needing root.
+    #[default]
     Tsi,
     /// Virtio-net interface connected to an external user-space stream socket (e.g. gvproxy, passt, or CNI socket).
     UnixStream(PathBuf),
     /// Complete air-gapped isolation: no network interfaces, only loopback (lo).
     None,
-}
-
-impl Default for NetworkMode {
-    fn default() -> Self {
-        NetworkMode::Tsi
-    }
 }
 
 pub struct DnsConfig;

@@ -57,7 +57,11 @@ impl DockerDaemon {
         let mut archive = Archive::new(stdout);
 
         if let Err(e) = archive.unpack(temp_bundle.path()) {
-            tracing::debug!("Failed to unpack local docker archive for {}: {}", image_name, e);
+            tracing::debug!(
+                "Failed to unpack local docker archive for {}: {}",
+                image_name,
+                e
+            );
             let _ = child.wait();
             return Ok(None);
         }
@@ -98,7 +102,9 @@ impl DockerDaemon {
 
         let safe_name = format!("local_{}", config_stem);
         let rootfs_dir = cache_base.join("rootfs").join(&safe_name);
-        let config_file = cache_base.join("configs").join(format!("{}.json", safe_name));
+        let config_file = cache_base
+            .join("configs")
+            .join(format!("{}.json", safe_name));
 
         if rootfs_dir.exists() && config_file.exists() {
             return Ok(Some((rootfs_dir, oci_config)));
@@ -111,7 +117,10 @@ impl DockerDaemon {
         }
         fs::create_dir_all(&staging_rootfs)?;
 
-        tracing::info!("Extracting {} layers from local Docker daemon...", entry.layers.len());
+        tracing::info!(
+            "Extracting {} layers from local Docker daemon...",
+            entry.layers.len()
+        );
         for layer_rel in &entry.layers {
             let layer_path = temp_bundle.path().join(layer_rel);
             let file = File::open(&layer_path)?;

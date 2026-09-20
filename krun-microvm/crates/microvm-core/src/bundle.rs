@@ -26,7 +26,10 @@ impl OciBundle {
         let bundle_dir = bundle_dir.as_ref().to_path_buf();
         let config_file = bundle_dir.join("config.json");
         if !config_file.exists() {
-            bail!("OCI bundle config.json not found at {}", config_file.display());
+            bail!(
+                "OCI bundle config.json not found at {}",
+                config_file.display()
+            );
         }
 
         let spec = Spec::load(&config_file)
@@ -46,7 +49,10 @@ impl OciBundle {
         };
 
         if !rootfs_path.exists() {
-            bail!("OCI bundle rootfs does not exist at {}", rootfs_path.display());
+            bail!(
+                "OCI bundle rootfs does not exist at {}",
+                rootfs_path.display()
+            );
         }
 
         // 2. Resolve process args, env, cwd, rlimits
@@ -118,7 +124,7 @@ impl OciBundle {
                     if src.exists() {
                         if src.is_dir() {
                             let tag = format!("mnt{}", i);
-                            let ro = m.options().as_ref().map_or(false, |opts| {
+                            let ro = m.options().as_ref().is_some_and(|opts| {
                                 opts.iter().any(|o| o == "ro" || o == "rbind:ro")
                             });
                             virtiofs_mounts.push(VirtioFsMount::new(tag, src, ro));

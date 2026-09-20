@@ -32,7 +32,11 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
     // 1. Handle deletion / finalizers
     if vm.metadata.deletion_timestamp.is_some() {
         if vm.finalizers().iter().any(|f| f == FINALIZER_NAME) {
-            tracing::info!("Cleaning up backing pod for MicroVm '{}/{}'...", namespace, name);
+            tracing::info!(
+                "Cleaning up backing pod for MicroVm '{}/{}'...",
+                namespace,
+                name
+            );
             let pod_name = format!("microvm-{}", name);
             let _ = pods.delete(&pod_name, &Default::default()).await;
 
@@ -42,7 +46,8 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                     "finalizers": vm.finalizers().iter().filter(|f| *f != FINALIZER_NAME).collect::<Vec<_>>()
                 }
             });
-            vms.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+            vms.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
             tracing::info!("Removed finalizer from MicroVm '{}/{}'", namespace, name);
         }
         return Ok(Action::await_change());
@@ -57,7 +62,8 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                 "finalizers": finalizers
             }
         });
-        vms.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+        vms.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
     }
 
     // 3. Check for backing Pod
@@ -90,20 +96,35 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
 
             let mut annotations = serde_json::Map::new();
             if let Some(ref dax) = vm.spec.dax_window_size {
-                annotations.insert("krun.io/dax-window-size".to_string(), serde_json::Value::String(dax.clone()));
+                annotations.insert(
+                    "krun.io/dax-window-size".to_string(),
+                    serde_json::Value::String(dax.clone()),
+                );
             }
             if let Some(ref model) = vm.spec.model_artifact {
-                annotations.insert("krun.io/model-artifact".to_string(), serde_json::Value::String(model.clone()));
+                annotations.insert(
+                    "krun.io/model-artifact".to_string(),
+                    serde_json::Value::String(model.clone()),
+                );
             }
             if let Some(ref acc) = vm.spec.image_acceleration {
                 if let Some(ref fmt) = acc.format {
-                    annotations.insert("krun.io/image-acceleration-format".to_string(), serde_json::Value::String(fmt.clone()));
+                    annotations.insert(
+                        "krun.io/image-acceleration-format".to_string(),
+                        serde_json::Value::String(fmt.clone()),
+                    );
                 }
                 if let Some(lazy) = acc.lazy_load {
-                    annotations.insert("krun.io/image-acceleration-lazy-load".to_string(), serde_json::Value::String(lazy.to_string()));
+                    annotations.insert(
+                        "krun.io/image-acceleration-lazy-load".to_string(),
+                        serde_json::Value::String(lazy.to_string()),
+                    );
                 }
                 if let Some(ref sz) = acc.chunk_size {
-                    annotations.insert("krun.io/image-acceleration-chunk-size".to_string(), serde_json::Value::String(sz.clone()));
+                    annotations.insert(
+                        "krun.io/image-acceleration-chunk-size".to_string(),
+                        serde_json::Value::String(sz.clone()),
+                    );
                 }
             }
 
@@ -163,7 +184,8 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
             };
 
             let patch = serde_json::json!({ "status": new_status });
-            vms.patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+            vms.patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
 
             Ok(Action::requeue(Duration::from_secs(5)))
         }
@@ -204,7 +226,8 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
             };
 
             let patch = serde_json::json!({ "status": new_status });
-            vms.patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+            vms.patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
 
             Ok(Action::requeue(Duration::from_secs(15)))
         }
@@ -234,7 +257,11 @@ pub async fn run_controller(client: Client) -> Result<(), Error> {
         .for_each(|res| async move {
             match res {
                 Ok((o, _action)) => {
-                    tracing::debug!("Reconciled MicroVm: {}/{}", o.namespace.unwrap_or_default(), o.name);
+                    tracing::debug!(
+                        "Reconciled MicroVm: {}/{}",
+                        o.namespace.unwrap_or_default(),
+                        o.name
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("Reconcile error: {:?}", e);

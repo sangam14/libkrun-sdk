@@ -25,8 +25,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| PathBuf::from("./models"));
 
     // Check if a local GGUF model exists, otherwise demonstrate Hugging Face mode
-    let gguf_model = std::env::var("GGUF_FILE").unwrap_or_else(|_| "mistral-7b-instruct-v0.2.Q4_K_M.gguf".to_string());
-    let hf_model = std::env::var("HF_MODEL").unwrap_or_else(|_| "mistralai/Mistral-7B-Instruct-v0.2".to_string());
+    let gguf_model = std::env::var("GGUF_FILE")
+        .unwrap_or_else(|_| "mistral-7b-instruct-v0.2.Q4_K_M.gguf".to_string());
+    let hf_model = std::env::var("HF_MODEL")
+        .unwrap_or_else(|_| "mistralai/Mistral-7B-Instruct-v0.2".to_string());
     let use_gguf = models_dir.join(&gguf_model).exists();
 
     println!("⚙️  Inference Configuration:");
@@ -34,9 +36,15 @@ async fn main() -> Result<()> {
     println!("   - Memory Allocation: 4096 MiB (4 GiB)");
     println!("   - vCPUs: 4");
     if use_gguf {
-        println!("   - Engine Mode: Local GGUF ({})", models_dir.join(&gguf_model).display());
+        println!(
+            "   - Engine Mode: Local GGUF ({})",
+            models_dir.join(&gguf_model).display()
+        );
     } else {
-        println!("   - Engine Mode: Hugging Face with In-Situ Quantization ({})", hf_model);
+        println!(
+            "   - Engine Mode: Hugging Face with In-Situ Quantization ({})",
+            hf_model
+        );
     }
 
     // 2. Build mistral.rs execution command
@@ -112,7 +120,10 @@ async fn main() -> Result<()> {
         match client.get(&health_url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 ready = true;
-                println!("🎉 mistralrs-server is ready and healthy! (in {:.1}s)", start.elapsed().as_secs_f64());
+                println!(
+                    "🎉 mistralrs-server is ready and healthy! (in {:.1}s)",
+                    start.elapsed().as_secs_f64()
+                );
                 break;
             }
             _ => {

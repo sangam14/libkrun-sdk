@@ -35,7 +35,10 @@ impl std::str::FromStr for AccelerationFormat {
             "rafsv6" | "rafs" | "nydus" => Ok(Self::RafsV6),
             "erofs" => Ok(Self::Erofs),
             "zran" | "stargz" => Ok(Self::Zran),
-            other => bail!("Unknown acceleration format: '{}'. Supported: rafsv6, erofs, zran", other),
+            other => bail!(
+                "Unknown acceleration format: '{}'. Supported: rafsv6, erofs, zran",
+                other
+            ),
         }
     }
 }
@@ -174,7 +177,7 @@ impl ImageAcceleration {
         if total_bytes == 0 || chunk_size == 0 {
             0
         } else {
-            (total_bytes + chunk_size - 1) / chunk_size
+            total_bytes.div_ceil(chunk_size)
         }
     }
 }
@@ -187,11 +190,26 @@ mod tests {
 
     #[test]
     fn test_format_parsing() {
-        assert_eq!("rafsv6".parse::<AccelerationFormat>().unwrap(), AccelerationFormat::RafsV6);
-        assert_eq!("rafs".parse::<AccelerationFormat>().unwrap(), AccelerationFormat::RafsV6);
-        assert_eq!("nydus".parse::<AccelerationFormat>().unwrap(), AccelerationFormat::RafsV6);
-        assert_eq!("erofs".parse::<AccelerationFormat>().unwrap(), AccelerationFormat::Erofs);
-        assert_eq!("zran".parse::<AccelerationFormat>().unwrap(), AccelerationFormat::Zran);
+        assert_eq!(
+            "rafsv6".parse::<AccelerationFormat>().unwrap(),
+            AccelerationFormat::RafsV6
+        );
+        assert_eq!(
+            "rafs".parse::<AccelerationFormat>().unwrap(),
+            AccelerationFormat::RafsV6
+        );
+        assert_eq!(
+            "nydus".parse::<AccelerationFormat>().unwrap(),
+            AccelerationFormat::RafsV6
+        );
+        assert_eq!(
+            "erofs".parse::<AccelerationFormat>().unwrap(),
+            AccelerationFormat::Erofs
+        );
+        assert_eq!(
+            "zran".parse::<AccelerationFormat>().unwrap(),
+            AccelerationFormat::Zran
+        );
         assert!("invalid".parse::<AccelerationFormat>().is_err());
     }
 
@@ -214,7 +232,8 @@ mod tests {
     fn test_inspect_rafs_magic() {
         let mut tmp = NamedTempFile::new().unwrap();
         // Write RAFS magic 0x52414653 ("RAFS")
-        tmp.write_all(&ImageAcceleration::RAFS_SUPER_MAGIC.to_be_bytes()).unwrap();
+        tmp.write_all(&ImageAcceleration::RAFS_SUPER_MAGIC.to_be_bytes())
+            .unwrap();
         tmp.flush().unwrap();
 
         let fmt = ImageAcceleration::inspect_bootstrap_magic(tmp.path()).unwrap();

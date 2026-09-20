@@ -36,7 +36,10 @@ impl ImageReference {
 
         let (registry, rest) = if let Some(slash_idx) = raw.find('/') {
             let potential_reg = &raw[..slash_idx];
-            if potential_reg.contains('.') || potential_reg.contains(':') || potential_reg == "localhost" {
+            if potential_reg.contains('.')
+                || potential_reg.contains(':')
+                || potential_reg == "localhost"
+            {
                 (potential_reg.to_string(), &raw[slash_idx + 1..])
             } else {
                 ("registry-1.docker.io".to_string(), raw)
@@ -102,7 +105,10 @@ mod tests {
 
         let r4 = ImageReference::parse("oci:/tmp/my-image:v2").unwrap();
         assert!(r4.is_local_layout);
-        assert_eq!(r4.layout_path.as_ref().unwrap(), &PathBuf::from("/tmp/my-image"));
+        assert_eq!(
+            r4.layout_path.as_ref().unwrap(),
+            &PathBuf::from("/tmp/my-image")
+        );
         assert_eq!(r4.tag, "v2");
         assert_eq!(r4.canonical_name(), "oci:/tmp/my-image:v2");
     }

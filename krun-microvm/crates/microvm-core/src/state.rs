@@ -25,7 +25,11 @@ pub struct VmState {
 #[cfg(target_os = "macos")]
 fn is_microvm_runner_process(pid: u32) -> bool {
     extern "C" {
-        fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, buffersize: u32) -> libc::c_int;
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_void,
+            buffersize: u32,
+        ) -> libc::c_int;
     }
     let mut buf = [0u8; 1024];
     let ret = unsafe {
@@ -129,7 +133,7 @@ impl StateManager {
             }
         }
 
-        vms.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        vms.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         Ok(vms)
     }
 

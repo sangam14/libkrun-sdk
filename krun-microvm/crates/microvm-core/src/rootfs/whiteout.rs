@@ -46,11 +46,13 @@ pub fn apply_whiteout(root_dir: &Path, rel_path: &Path) -> Result<()> {
         let target_path = parent_dir.join(target_name);
         if target_path.exists() || target_path.is_symlink() {
             if target_path.is_dir() {
-                fs::remove_dir_all(&target_path)
-                    .with_context(|| format!("Failed to remove whiteout dir {}", target_path.display()))?;
+                fs::remove_dir_all(&target_path).with_context(|| {
+                    format!("Failed to remove whiteout dir {}", target_path.display())
+                })?;
             } else {
-                fs::remove_file(&target_path)
-                    .with_context(|| format!("Failed to remove whiteout file {}", target_path.display()))?;
+                fs::remove_file(&target_path).with_context(|| {
+                    format!("Failed to remove whiteout file {}", target_path.display())
+                })?;
             }
         }
     }

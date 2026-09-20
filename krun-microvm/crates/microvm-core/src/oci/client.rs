@@ -85,7 +85,9 @@ impl OciClient {
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
                 if let Some(auth_hdr) = resp.headers().get(WWW_AUTHENTICATE) {
                     if let Ok(hdr_str) = auth_hdr.to_str() {
-                        if let Ok(Some(tok)) = self.token_from_www_authenticate(hdr_str, reference).await {
+                        if let Ok(Some(tok)) =
+                            self.token_from_www_authenticate(hdr_str, reference).await
+                        {
                             return Ok(Some(tok));
                         }
                     }
@@ -147,7 +149,8 @@ impl OciClient {
         if let Some(s) = service {
             req = req.query(&[("service", s)]);
         }
-        let final_scope = scope.unwrap_or_else(|| format!("repository:{}:pull", reference.repository));
+        let final_scope =
+            scope.unwrap_or_else(|| format!("repository:{}:pull", reference.repository));
         req = req.query(&[("scope", final_scope)]);
 
         let resp = req.send().await?;
@@ -205,7 +208,9 @@ impl OciClient {
 
         let safe_digest = manifest_digest.replace(':', "_");
         let rootfs_dir = cache_base.join("rootfs").join(&safe_digest);
-        let config_file = cache_base.join("configs").join(format!("{}.json", safe_digest));
+        let config_file = cache_base
+            .join("configs")
+            .join(format!("{}.json", safe_digest));
 
         // Cache hit check
         if rootfs_dir.exists() && config_file.exists() {
@@ -220,8 +225,8 @@ impl OciClient {
         let config_bytes = self
             .fetch_blob(reference, &manifest.config.digest, token_ref)
             .await?;
-        let full_config: serde_json::Value = serde_json::from_slice(&config_bytes)
-            .context("Failed to parse image config JSON")?;
+        let full_config: serde_json::Value =
+            serde_json::from_slice(&config_bytes).context("Failed to parse image config JSON")?;
 
         let oci_config = parse_oci_config_from_json(&full_config);
 
@@ -232,9 +237,18 @@ impl OciClient {
         }
         fs::create_dir_all(&staging_rootfs)?;
 
-        tracing::info!("Extracting {} layers for {} (streaming)...", manifest.layers.len(), reference.canonical_name());
+        tracing::info!(
+            "Extracting {} layers for {} (streaming)...",
+            manifest.layers.len(),
+            reference.canonical_name()
+        );
         for (i, layer) in manifest.layers.iter().enumerate() {
-            tracing::info!("Extracting layer [{}/{}] ({})", i + 1, manifest.layers.len(), layer.digest);
+            tracing::info!(
+                "Extracting layer [{}/{}] ({})",
+                i + 1,
+                manifest.layers.len(),
+                layer.digest
+            );
             let blob_bytes = self
                 .fetch_blob_bytes(reference, &layer.digest, token_ref)
                 .await?;
@@ -282,7 +296,12 @@ impl OciClient {
             ),
         );
 
-        let resp = self.http.get(&manifest_url).headers(headers.clone()).send().await?;
+        let resp = self
+            .http
+            .get(&manifest_url)
+            .headers(headers.clone())
+            .send()
+            .await?;
         if !resp.status().is_success() {
             bail!("Failed to fetch manifest: HTTP {}", resp.status());
         }
@@ -311,9 +330,9 @@ impl OciClient {
                     Some(entry) => &entry.digest,
                     None => {
                         // fallback to first linux manifest
-                        &entries
+                        entries
                             .iter()
-                            .find(|e| e.platform.as_ref().map_or(false, |p| p.os == "linux"))
+                            .find(|e| e.platform.as_ref().is_some_and(|p| p.os == "linux"))
                             .map(|e| &e.digest)
                             .unwrap_or(&entries[0].digest)
                     }
@@ -332,8 +351,8 @@ impl OciClient {
             }
         }
 
-        let single: SingleManifest = serde_json::from_slice(&body_bytes)
-            .context("Failed to parse single manifest")?;
+        let single: SingleManifest =
+            serde_json::from_slice(&body_bytes).context("Failed to parse single manifest")?;
         Ok((single, digest_str))
     }
 
@@ -375,19 +394,31 @@ pub(crate) fn parse_oci_config_from_json(json: &serde_json::Value) -> OciConfig 
     let entrypoint = config_node
         .get("Entrypoint")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let cmd = config_node
         .get("Cmd")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let env = config_node
         .get("Env")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let working_dir = config_node
@@ -421,8 +452,12 @@ mod tests {
             if let Some((k, v)) = part.split_once('=') {
                 let key = k.trim();
                 let val = v.trim().trim_matches('"');
-                if key == "realm" { realm = Some(val.to_string()); }
-                if key == "service" { service = Some(val.to_string()); }
+                if key == "realm" {
+                    realm = Some(val.to_string());
+                }
+                if key == "service" {
+                    service = Some(val.to_string());
+                }
             }
         }
         assert_eq!(realm.as_deref(), Some("https://quay.io/v2/auth"));

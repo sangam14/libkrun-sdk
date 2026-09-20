@@ -84,7 +84,11 @@ pub fn collect_process_stats(pid: u32) -> Option<ProcessStats> {
     let clk_tck = if clk_tck > 0 { clk_tck as u64 } else { 100 };
 
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    let page_size = if page_size > 0 { page_size as u64 } else { 4096 };
+    let page_size = if page_size > 0 {
+        page_size as u64
+    } else {
+        4096
+    };
 
     // 1. Read /proc/[pid]/stat
     let stat_content = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
@@ -138,7 +142,10 @@ mod tests {
     fn test_current_process_telemetry_collection() {
         let current_pid = std::process::id();
         let stats = collect_process_stats(current_pid);
-        assert!(stats.is_some(), "Should be able to collect stats for current process");
+        assert!(
+            stats.is_some(),
+            "Should be able to collect stats for current process"
+        );
 
         let s = stats.unwrap();
         assert!(s.memory_rss_bytes > 0, "RSS memory should be > 0");
