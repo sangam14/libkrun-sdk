@@ -3,6 +3,7 @@
 //! Provides nanosecond CPU user/system times, resident set size (RSS), virtual memory,
 //! page fault counters, and active thread counts.
 
+use crate::state::{VmState, VmStatus};
 use serde::{Deserialize, Serialize};
 
 /// Snapshot of resource consumption for a process.
@@ -134,9 +135,236 @@ pub fn collect_process_stats(_pid: u32) -> Option<ProcessStats> {
     None
 }
 
+/// Escapes special characters in label values according to the Prometheus exposition format.
+fn escape_prometheus_label(val: &str) -> String {
+    let mut out = String::with_capacity(val.len());
+    for c in val.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Exports microVM inventory, configuration, and runtime telemetry in standard
+/// Prometheus text exposition format (version 0.0.4).
+pub fn export_prometheus_metrics(vms: &[VmState]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
+    let total = vms.len();
+    let running = vms.iter().filter(|v| v.status == VmStatus::Running).count();
+    let paused = vms.iter().filter(|v| v.status == VmStatus::Paused).count();
+    let stopped = vms.iter().filter(|v| v.status == VmStatus::Stopped).count();
+
+    let _ = writeln!(
+        out,
+        "# HELP microvm_vms_total Total number of tracked microVMs"
+    );
+    let _ = writeln!(out, "# TYPE microvm_vms_total gauge");
+    let _ = writeln!(out, "microvm_vms_total {}", total);
+
+    let _ = writeln!(
+        out,
+        "# HELP microvm_vms_running_total Number of currently running microVMs"
+    );
+    let _ = writeln!(out, "# TYPE microvm_vms_running_total gauge");
+    let _ = writeln!(out, "microvm_vms_running_total {}", running);
+
+    let _ = writeln!(
+        out,
+        "# HELP microvm_vms_paused_total Number of currently paused microVMs"
+    );
+    let _ = writeln!(out, "# TYPE microvm_vms_paused_total gauge");
+    let _ = writeln!(out, "microvm_vms_paused_total {}", paused);
+
+    let _ = writeln!(
+        out,
+        "# HELP microvm_vms_stopped_total Number of stopped microVMs"
+    );
+    let _ = writeln!(out, "# TYPE microvm_vms_stopped_total gauge");
+    let _ = writeln!(out, "microvm_vms_stopped_total {}", stopped);
+
+    if !vms.is_empty() {
+        let _ = writeln!(
+            out,
+            "# HELP microvm_info Informational gauge for microVM metadata"
+        );
+        let _ = writeln!(out, "# TYPE microvm_info gauge");
+        for vm in vms {
+            let status_str = match vm.status {
+                VmStatus::Running => "running",
+                VmStatus::Paused => "paused",
+                VmStatus::Stopped => "stopped",
+            };
+            let _ = writeln!(
+                out,
+                "microvm_info{{vm_id=\"{}\",image=\"{}\",status=\"{}\",pid=\"{}\"}} 1",
+                escape_prometheus_label(&vm.id),
+                escape_prometheus_label(&vm.image),
+                status_str,
+                vm.pid
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP microvm_configured_vcpus Configured virtual CPUs allocated to the microVM"
+        );
+        let _ = writeln!(out, "# TYPE microvm_configured_vcpus gauge");
+        for vm in vms {
+            if let Some(vcpus) = vm.vcpus {
+                let _ = writeln!(
+                    out,
+                    "microvm_configured_vcpus{{vm_id=\"{}\"}} {}",
+                    escape_prometheus_label(&vm.id),
+                    vcpus
+                );
+            }
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP microvm_configured_memory_mib Configured RAM allocation in MiB"
+        );
+        let _ = writeln!(out, "# TYPE microvm_configured_memory_mib gauge");
+        for vm in vms {
+            if let Some(mem) = vm.memory_mib {
+                let _ = writeln!(
+                    out,
+                    "microvm_configured_memory_mib{{vm_id=\"{}\"}} {}",
+                    escape_prometheus_label(&vm.id),
+                    mem
+                );
+            }
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP microvm_uptime_seconds Seconds elapsed since microVM creation"
+        );
+        let _ = writeln!(out, "# TYPE microvm_uptime_seconds gauge");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for vm in vms {
+            let uptime = now.saturating_sub(vm.created_at);
+            let _ = writeln!(
+                out,
+                "microvm_uptime_seconds{{vm_id=\"{}\"}} {}",
+                escape_prometheus_label(&vm.id),
+                uptime
+            );
+        }
+
+        // Live runtime telemetry for running VMs
+        let mut telemetry_entries = Vec::new();
+        for vm in vms {
+            if vm.status == VmStatus::Running && vm.pid > 0 {
+                if let Some(stats) = collect_process_stats(vm.pid) {
+                    telemetry_entries.push((vm.id.clone(), stats));
+                }
+            }
+        }
+
+        if !telemetry_entries.is_empty() {
+            let _ = writeln!(
+                out,
+                "# HELP microvm_cpu_user_seconds Total CPU time spent in user mode in seconds"
+            );
+            let _ = writeln!(out, "# TYPE microvm_cpu_user_seconds counter");
+            for (id, stats) in &telemetry_entries {
+                let _ = writeln!(
+                    out,
+                    "microvm_cpu_user_seconds{{vm_id=\"{}\"}} {:.6}",
+                    escape_prometheus_label(id),
+                    stats.user_cpu_ns as f64 / 1_000_000_000.0
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP microvm_cpu_system_seconds Total CPU time spent in kernel/system mode in seconds"
+            );
+            let _ = writeln!(out, "# TYPE microvm_cpu_system_seconds counter");
+            for (id, stats) in &telemetry_entries {
+                let _ = writeln!(
+                    out,
+                    "microvm_cpu_system_seconds{{vm_id=\"{}\"}} {:.6}",
+                    escape_prometheus_label(id),
+                    stats.kernel_cpu_ns as f64 / 1_000_000_000.0
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP microvm_memory_rss_bytes Resident Set Size (RSS) memory consumption in bytes"
+            );
+            let _ = writeln!(out, "# TYPE microvm_memory_rss_bytes gauge");
+            for (id, stats) in &telemetry_entries {
+                let _ = writeln!(
+                    out,
+                    "microvm_memory_rss_bytes{{vm_id=\"{}\"}} {}",
+                    escape_prometheus_label(id),
+                    stats.memory_rss_bytes
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP microvm_memory_vsize_bytes Virtual memory allocation in bytes"
+            );
+            let _ = writeln!(out, "# TYPE microvm_memory_vsize_bytes gauge");
+            for (id, stats) in &telemetry_entries {
+                let _ = writeln!(
+                    out,
+                    "microvm_memory_vsize_bytes{{vm_id=\"{}\"}} {}",
+                    escape_prometheus_label(id),
+                    stats.memory_vsize_bytes
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP microvm_threads_total Active supervisor thread count"
+            );
+            let _ = writeln!(out, "# TYPE microvm_threads_total gauge");
+            for (id, stats) in &telemetry_entries {
+                let _ = writeln!(
+                    out,
+                    "microvm_threads_total{{vm_id=\"{}\"}} {}",
+                    escape_prometheus_label(id),
+                    stats.threads
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP microvm_page_faults_total Page faults incurred by supervisor"
+            );
+            let _ = writeln!(out, "# TYPE microvm_page_faults_total counter");
+            for (id, stats) in &telemetry_entries {
+                let _ = writeln!(
+                    out,
+                    "microvm_page_faults_total{{vm_id=\"{}\"}} {}",
+                    escape_prometheus_label(id),
+                    stats.page_faults
+                );
+            }
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_current_process_telemetry_collection() {
@@ -156,5 +384,68 @@ mod tests {
     fn test_invalid_pid_handling() {
         assert!(collect_process_stats(0).is_none());
         assert!(collect_process_stats(999_999_999).is_none());
+    }
+
+    #[test]
+    fn test_escape_prometheus_label() {
+        assert_eq!(escape_prometheus_label("clean_str"), "clean_str");
+        assert_eq!(
+            escape_prometheus_label("quoted \"val\" with \\slash and \nnewline"),
+            "quoted \\\"val\\\" with \\\\slash and \\nnewline"
+        );
+    }
+
+    #[test]
+    fn test_export_prometheus_metrics_empty() {
+        let metrics = export_prometheus_metrics(&[]);
+        assert!(metrics.contains("microvm_vms_total 0"));
+        assert!(metrics.contains("microvm_vms_running_total 0"));
+        assert!(metrics.contains("microvm_vms_paused_total 0"));
+        assert!(metrics.contains("microvm_vms_stopped_total 0"));
+    }
+
+    #[test]
+    fn test_export_prometheus_metrics_populated() {
+        let vms = vec![
+            VmState {
+                id: "vm-prom-1".to_string(),
+                pid: std::process::id(),
+                image: "alpine:latest".to_string(),
+                created_at: 1000,
+                port_forwards: vec![],
+                instance_dir: PathBuf::from("/tmp/prom-1"),
+                status: VmStatus::Running,
+                vcpus: Some(4),
+                memory_mib: Some(1024),
+            },
+            VmState {
+                id: "vm-prom-2".to_string(),
+                pid: 0,
+                image: "ubuntu:22.04".to_string(),
+                created_at: 2000,
+                port_forwards: vec![],
+                instance_dir: PathBuf::from("/tmp/prom-2"),
+                status: VmStatus::Stopped,
+                vcpus: Some(2),
+                memory_mib: Some(512),
+            },
+        ];
+
+        let metrics = export_prometheus_metrics(&vms);
+        assert!(metrics.contains("microvm_vms_total 2"));
+        assert!(metrics.contains("microvm_vms_running_total 1"));
+        assert!(metrics.contains("microvm_vms_stopped_total 1"));
+        assert!(metrics.contains(
+            "microvm_info{vm_id=\"vm-prom-1\",image=\"alpine:latest\",status=\"running\",pid="
+        ));
+        assert!(metrics.contains("microvm_info{vm_id=\"vm-prom-2\",image=\"ubuntu:22.04\",status=\"stopped\",pid=\"0\"} 1"));
+        assert!(metrics.contains("microvm_configured_vcpus{vm_id=\"vm-prom-1\"} 4"));
+        assert!(metrics.contains("microvm_configured_memory_mib{vm_id=\"vm-prom-1\"} 1024"));
+        assert!(metrics.contains("microvm_configured_vcpus{vm_id=\"vm-prom-2\"} 2"));
+        assert!(metrics.contains("microvm_configured_memory_mib{vm_id=\"vm-prom-2\"} 512"));
+        assert!(metrics.contains("microvm_uptime_seconds{vm_id=\"vm-prom-1\"}"));
+        // Check live telemetry collected for current process
+        assert!(metrics.contains("microvm_memory_rss_bytes{vm_id=\"vm-prom-1\"}"));
+        assert!(metrics.contains("microvm_threads_total{vm_id=\"vm-prom-1\"}"));
     }
 }

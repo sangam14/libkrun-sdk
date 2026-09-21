@@ -3,6 +3,8 @@ use krun_sys::KrunContext;
 use microvm_core::types::RunnerConfig;
 use std::process::ExitCode;
 
+mod sandbox;
+
 fn validate_config(cfg: &RunnerConfig) -> Result<()> {
     if !cfg.root_path.exists() {
         bail!("Root path does not exist: {}", cfg.root_path.display());
@@ -116,6 +118,9 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         ctx.add_vsock_port(vp.port, &vp.socket_path)
             .with_context(|| format!("Failed to add vsock port {}", vp.port))?;
     }
+
+    // 7. Enforce zero-trust host sandboxing before entering hypervisor
+    sandbox::apply_sandbox(&cfg)?;
 
     // Launch the VM.
     // WARNING: This never returns on success. The calling process becomes the VM supervisor.

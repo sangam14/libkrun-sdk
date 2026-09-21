@@ -96,6 +96,7 @@ pub struct MicroVmBuilder {
     gpu: bool,
     gpu_shm_size: Option<u64>,
     gpu_flags: Option<u32>,
+    sandbox: bool,
 }
 
 impl MicroVmBuilder {
@@ -134,6 +135,7 @@ impl MicroVmBuilder {
             gpu: false,
             gpu_shm_size: None,
             gpu_flags: None,
+            sandbox: true,
         }
     }
 
@@ -404,6 +406,12 @@ impl MicroVmBuilder {
     /// Custom virglrenderer flags (defaults to Venus/Metal acceleration flags).
     pub fn gpu_flags(mut self, flags: u32) -> Self {
         self.gpu_flags = Some(flags);
+        self
+    }
+
+    /// Enables or disables zero-trust host sandboxing (Landlock LSM and Seccomp syscall filtering on Linux).
+    pub fn sandbox(mut self, enabled: bool) -> Self {
+        self.sandbox = enabled;
         self
     }
 
@@ -681,6 +689,7 @@ impl MicroVmBuilder {
             gpu: self.gpu,
             gpu_shm_size_bytes: self.gpu_shm_size,
             gpu_flags: self.gpu_flags,
+            sandbox: self.sandbox,
         };
 
         let runner_cfg_path = instance_dir.join("runner_config.json");
@@ -754,6 +763,8 @@ impl MicroVmBuilder {
             port_forwards: self.port_forwards.clone(),
             instance_dir: instance_dir.clone(),
             status: crate::state::VmStatus::Running,
+            vcpus: Some(self.vcpus),
+            memory_mib: Some(self.ram_mib),
         };
         let _ = crate::state::StateManager::save(&data_dir, &vm_state);
 

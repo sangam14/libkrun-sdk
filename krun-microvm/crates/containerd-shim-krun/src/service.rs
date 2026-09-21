@@ -513,12 +513,58 @@ impl Task for KrunTask {
 
     async fn update(&self, _ctx: &TtrpcContext, req: UpdateTaskRequest) -> ttrpc::Result<Empty> {
         let instances = self.instances.lock().await;
-        if !instances.contains_key(req.id()) {
-            return Err(ttrpc::Error::RpcStatus(ttrpc::get_status(
+        let _inst = instances.get(req.id()).ok_or_else(|| {
+            ttrpc::Error::RpcStatus(ttrpc::get_status(
                 ttrpc::Code::NOT_FOUND,
                 format!("task {} not found", req.id()),
-            )));
+            ))
+        })?;
+
+        // Extract memory and CPU if provided in req.resources
+        let mut new_mem_mib = None;
+        let mut new_cpus = None;
+
+        if let Some(res_any) = req.resources.as_ref() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&res_any.value) {
+                if let Some(mem_bytes) = val
+                    .get("memory")
+                    .and_then(|m| m.get("limit"))
+                    .and_then(|l| l.as_i64())
+                {
+                    if mem_bytes > 0 {
+                        new_mem_mib = Some((mem_bytes / (1024 * 1024)) as u32);
+                    }
+                }
+                if let Some(cpus_val) = val
+                    .get("cpu")
+                    .and_then(|c| c.get("cpus").or_else(|| c.get("shares")))
+                {
+                    if let Some(c) = cpus_val.as_u64() {
+                        if c > 0 {
+                            new_cpus = Some(c as u8);
+                        }
+                    }
+                }
+            }
         }
+
+        if new_mem_mib.is_some() || new_cpus.is_some() {
+            let data_dir = std::env::var("KRUN_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    PathBuf::from(home).join(".cache/krun-microvm")
+                });
+            if let Err(e) = microvm_core::state::StateManager::resize(
+                &data_dir,
+                req.id(),
+                new_mem_mib,
+                new_cpus,
+            ) {
+                tracing::warn!("Failed to dynamically resize microvm {}: {}", req.id(), e);
+            }
+        }
+
         Ok(Empty::new())
     }
 

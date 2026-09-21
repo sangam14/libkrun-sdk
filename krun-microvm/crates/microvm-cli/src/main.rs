@@ -129,6 +129,10 @@ pub struct RunArgs {
     #[arg(long = "gpu-shm-size")]
     pub gpu_shm_size: Option<String>,
 
+    /// Disable zero-trust host sandboxing restrictions
+    #[arg(long = "no-sandbox")]
+    pub no_sandbox: bool,
+
     /// Optional command to override ENTRYPOINT/CMD
     #[arg(last = true)]
     pub cmd: Vec<String>,
@@ -353,6 +357,39 @@ enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+
+    /// Dynamically resize CPU and memory resources of a running microVM
+    Resize {
+        /// ID or PID of the running microVM
+        id: String,
+
+        /// New memory allocation in MiB
+        #[arg(short = 'm', long)]
+        memory: Option<u32>,
+
+        /// New virtual CPU count
+        #[arg(short = 'c', long)]
+        cpus: Option<u8>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Export Prometheus metrics or start a live scrape HTTP server
+    Metrics {
+        /// Address to listen on for Prometheus scrapes (e.g. 127.0.0.1:9090 or 0.0.0.0:9090)
+        #[arg(short, long)]
+        listen: Option<String>,
+
+        /// Format single-shot metrics output as JSON instead of Prometheus format
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -416,6 +453,7 @@ async fn main() -> Result<()> {
                 chunk_size,
                 gpu,
                 gpu_shm_size,
+                no_sandbox,
                 cmd,
             } = *run;
             let mut builder = if let Some(ref b) = bundle {
@@ -439,7 +477,8 @@ async fn main() -> Result<()> {
                 .interactive(interactive)
                 .tty(tty)
                 .detach(detach)
-                .no_network(no_network);
+                .no_network(no_network)
+                .sandbox(!no_sandbox);
 
             if gpu {
                 builder = builder.gpu(true);
@@ -769,6 +808,8 @@ async fn main() -> Result<()> {
                     "image": vm.image,
                     "status": if is_alive { "Running" } else { "Stopped" },
                     "created_at": vm.created_at,
+                    "vcpus": vm.vcpus,
+                    "memory_mib": vm.memory_mib,
                     "port_forwards": vm.port_forwards,
                     "instance_dir": vm.instance_dir.display().to_string(),
                     "console_log": console_log.display().to_string(),
@@ -788,6 +829,12 @@ async fn main() -> Result<()> {
                     }
                 );
                 println!("  Image:           {}", vm.image);
+                if let Some(c) = vm.vcpus {
+                    println!("  Configured CPUs: {}", c);
+                }
+                if let Some(m) = vm.memory_mib {
+                    println!("  Allocated RAM:   {} MiB", m);
+                }
                 println!(
                     "  Created:         {} ({})",
                     format_duration_since(vm.created_at),
@@ -1332,8 +1379,103 @@ async fn main() -> Result<()> {
                 restored.instance_dir.display()
             );
         }
+
+        Commands::Resize {
+            id,
+            memory,
+            cpus,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let updated = StateManager::resize(&base, &id, memory, cpus)?;
+            println!("✅ MicroVM '{}' resized successfully:", updated.id);
+            if let Some(m) = updated.memory_mib {
+                println!("   RAM:   {} MiB", m);
+            }
+            if let Some(c) = updated.vcpus {
+                println!("   vCPUs: {}", c);
+            }
+        }
+
+        Commands::Metrics {
+            listen,
+            json,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            if let Some(addr) = listen {
+                start_metrics_server(&base, &addr, json).await?;
+            } else {
+                let vms = StateManager::list(&base)?;
+                if json {
+                    let summary = json!({
+                        "total": vms.len(),
+                        "running": vms.iter().filter(|v| v.status == VmStatus::Running).count(),
+                        "paused": vms.iter().filter(|v| v.status == VmStatus::Paused).count(),
+                        "stopped": vms.iter().filter(|v| v.status == VmStatus::Stopped).count(),
+                        "vms": vms,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&summary)?);
+                } else {
+                    let exposition = microvm_core::metrics::export_prometheus_metrics(&vms);
+                    print!("{}", exposition);
+                }
+            }
+        }
     }
 
+    Ok(())
+}
+
+async fn start_metrics_server(data_dir: &Path, addr: &str, format_json: bool) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("Failed to bind metrics HTTP server to {}", addr))?;
+    println!(
+        "📊 MicroVM Prometheus Metrics Exporter listening on http://{}/metrics",
+        addr
+    );
+    println!("   Press Ctrl+C to stop.");
+
+    let data_dir = data_dir.to_path_buf();
+    loop {
+        tokio::select! {
+            accept_res = listener.accept() => {
+                let (mut socket, peer) = accept_res?;
+                tracing::debug!("Metrics scrape connection from {}", peer);
+                let vms = StateManager::list(&data_dir).unwrap_or_default();
+                let (content_type, body) = if format_json {
+                    let summary = json!({
+                        "total": vms.len(),
+                        "running": vms.iter().filter(|v| v.status == VmStatus::Running).count(),
+                        "paused": vms.iter().filter(|v| v.status == VmStatus::Paused).count(),
+                        "stopped": vms.iter().filter(|v| v.status == VmStatus::Stopped).count(),
+                        "vms": vms,
+                    });
+                    ("application/json", serde_json::to_string_pretty(&summary).unwrap_or_default())
+                } else {
+                    ("text/plain; version=0.0.4; charset=utf-8", microvm_core::metrics::export_prometheus_metrics(&vms))
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content_type,
+                    body.len(),
+                    body
+                );
+
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nShutting down metrics exporter...");
+                break;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1659,6 +1801,66 @@ mod tests {
                 assert_eq!(name.as_deref(), Some("vm-restored-99"));
             }
             _ => panic!("Expected Commands::Restore"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_run_no_sandbox() {
+        let args = vec!["microvm", "run", "--no-sandbox", "alpine:latest"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Run(run) => {
+                assert!(run.no_sandbox);
+                assert_eq!(run.image, "alpine:latest");
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_resize() {
+        let args = vec![
+            "microvm",
+            "resize",
+            "vm-test-1",
+            "--memory",
+            "1024",
+            "--cpus",
+            "4",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Resize {
+                id, memory, cpus, ..
+            } => {
+                assert_eq!(id, "vm-test-1");
+                assert_eq!(memory, Some(1024));
+                assert_eq!(cpus, Some(4));
+            }
+            _ => panic!("Expected Commands::Resize"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_metrics() {
+        let args = vec!["microvm", "metrics", "--listen", "127.0.0.1:9090"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Metrics { listen, json, .. } => {
+                assert_eq!(listen.as_deref(), Some("127.0.0.1:9090"));
+                assert!(!json);
+            }
+            _ => panic!("Expected Commands::Metrics"),
+        }
+
+        let json_args = vec!["microvm", "metrics", "--json"];
+        let cli = Cli::try_parse_from(json_args).unwrap();
+        match cli.command {
+            Commands::Metrics { listen, json, .. } => {
+                assert!(listen.is_none());
+                assert!(json);
+            }
+            _ => panic!("Expected Commands::Metrics"),
         }
     }
 }

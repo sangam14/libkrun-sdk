@@ -16,7 +16,7 @@ pub use bundle::OciBundle;
 
 pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};
-pub use metrics::{collect_process_stats, ProcessStats};
+pub use metrics::{collect_process_stats, export_prometheus_metrics, ProcessStats};
 pub use net::{DnsConfig, NetworkMode};
 pub use oci::{ArtifactMetadata, ImageReference, OciArtifact, OciClient, OciLayout};
 pub use preflight::{CheckResult, Preflight};

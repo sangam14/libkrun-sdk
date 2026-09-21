@@ -95,4 +95,10 @@ pub struct RunnerConfig {
     pub gpu_shm_size_bytes: Option<u64>,
     #[serde(default)]
     pub gpu_flags: Option<u32>,
+    #[serde(default = "default_true")]
+    pub sandbox: bool,
+}
+
+fn default_true() -> bool {
+    true
 }

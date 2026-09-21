@@ -20,6 +20,10 @@ pub struct VmState {
     pub port_forwards: Vec<PortForward>,
     pub instance_dir: PathBuf,
     pub status: VmStatus,
+    #[serde(default)]
+    pub vcpus: Option<u8>,
+    #[serde(default)]
+    pub memory_mib: Option<u32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -138,6 +142,26 @@ impl StateManager {
                         } else {
                             VmStatus::Stopped
                         };
+                        if vm.vcpus.is_none() || vm.memory_mib.is_none() {
+                            for cfg_name in &["runner_config.json", ".krun_config.json"] {
+                                let cfg_p = vm.instance_dir.join(cfg_name);
+                                if let Ok(cfg_data) = fs::read_to_string(&cfg_p) {
+                                    if let Ok(runner_cfg) =
+                                        serde_json::from_str::<crate::types::RunnerConfig>(
+                                            &cfg_data,
+                                        )
+                                    {
+                                        if vm.vcpus.is_none() {
+                                            vm.vcpus = Some(runner_cfg.num_vcpus);
+                                        }
+                                        if vm.memory_mib.is_none() {
+                                            vm.memory_mib = Some(runner_cfg.ram_mib);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         vms.push(vm);
                     }
                 }
@@ -206,6 +230,71 @@ impl StateManager {
         }
 
         vm.status = VmStatus::Running;
+        Self::save(data_dir, &vm)?;
+        Ok(vm)
+    }
+
+    /// Dynamically resizes CPU and/or RAM limits of a running microVM in-place.
+    pub fn resize(
+        data_dir: &Path,
+        id_or_pid: &str,
+        memory_mib: Option<u32>,
+        vcpus: Option<u8>,
+    ) -> Result<VmState> {
+        if memory_mib.is_none() && vcpus.is_none() {
+            bail!("At least one resource (--memory or --cpus) must be specified to resize");
+        }
+
+        if let Some(mem) = memory_mib {
+            if mem == 0 {
+                bail!("Memory must be greater than 0 MiB");
+            }
+        }
+
+        if let Some(cpus) = vcpus {
+            if cpus == 0 {
+                bail!("vCPUs must be greater than 0");
+            }
+        }
+
+        let mut vm = match Self::find(data_dir, id_or_pid)? {
+            Some(v) => v,
+            None => bail!("MicroVM with ID or PID '{}' not found", id_or_pid),
+        };
+
+        if !vm.is_process_alive() {
+            bail!("Cannot resize microVM '{}': process is not running", vm.id);
+        }
+
+        // Update runner_config.json and/or .krun_config.json if present in instance_dir
+        for cfg_name in &["runner_config.json", ".krun_config.json"] {
+            let cfg_path = vm.instance_dir.join(cfg_name);
+            if cfg_path.exists() {
+                if let Ok(content) = fs::read_to_string(&cfg_path) {
+                    if let Ok(mut runner_cfg) =
+                        serde_json::from_str::<crate::types::RunnerConfig>(&content)
+                    {
+                        if let Some(mem) = memory_mib {
+                            runner_cfg.ram_mib = mem;
+                        }
+                        if let Some(cpus) = vcpus {
+                            runner_cfg.num_vcpus = cpus;
+                        }
+                        if let Ok(updated) = serde_json::to_string_pretty(&runner_cfg) {
+                            let _ = fs::write(&cfg_path, updated);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(mem) = memory_mib {
+            vm.memory_mib = Some(mem);
+        }
+        if let Some(cpus) = vcpus {
+            vm.vcpus = Some(cpus);
+        }
+
         Self::save(data_dir, &vm)?;
         Ok(vm)
     }
@@ -539,6 +628,8 @@ impl StateManager {
             port_forwards: manifest.port_forwards,
             instance_dir: instances_dir,
             status: VmStatus::Stopped,
+            vcpus: manifest.runner_config.as_ref().map(|c| c.num_vcpus),
+            memory_mib: manifest.runner_config.as_ref().map(|c| c.ram_mib),
         };
 
         Self::save(data_dir, &new_state)?;
@@ -595,6 +686,8 @@ mod tests {
             port_forwards: vec![],
             instance_dir: dir.path().join("instances/vm-test-1"),
             status: VmStatus::Running,
+            vcpus: Some(2),
+            memory_mib: Some(512),
         };
 
         StateManager::save(dir.path(), &vm).unwrap();
@@ -603,6 +696,8 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "vm-test-1");
         assert_eq!(list[0].status, VmStatus::Running);
+        assert_eq!(list[0].vcpus, Some(2));
+        assert_eq!(list[0].memory_mib, Some(512));
 
         StateManager::remove(dir.path(), "vm-test-1").unwrap();
         let list = StateManager::list(dir.path()).unwrap();
@@ -623,6 +718,8 @@ mod tests {
             port_forwards: vec![],
             instance_dir: instance_dir.clone(),
             status: VmStatus::Running,
+            vcpus: None,
+            memory_mib: None,
         };
         StateManager::save(dir.path(), &vm).unwrap();
 
@@ -654,6 +751,8 @@ mod tests {
             port_forwards: vec![],
             instance_dir: PathBuf::from("/tmp/instances/vm-unrelated-test"),
             status: VmStatus::Running,
+            vcpus: None,
+            memory_mib: None,
         };
         // Should detect it is not a microvm-runner and return false
         assert!(!vm.is_process_alive());
@@ -673,6 +772,8 @@ mod tests {
             port_forwards: vec![],
             instance_dir: instance_dir.clone(),
             status: VmStatus::Stopped,
+            vcpus: None,
+            memory_mib: None,
         };
         StateManager::save(dir.path(), &vm).unwrap();
 
@@ -704,6 +805,8 @@ mod tests {
             port_forwards: vec![],
             instance_dir: instance_dir.clone(),
             status: VmStatus::Stopped,
+            vcpus: None,
+            memory_mib: None,
         };
         StateManager::save(dir.path(), &vm).unwrap();
 
@@ -716,6 +819,129 @@ mod tests {
         let resume_res = StateManager::resume(dir.path(), "vm-pause-test");
         assert!(resume_res.is_err());
         assert!(resume_res.unwrap_err().to_string().contains("not running"));
+    }
+
+    #[test]
+    fn test_state_manager_resize_success() {
+        let dir = tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/vm-resize-test");
+        fs::create_dir_all(&instance_dir).unwrap();
+
+        let runner_cfg = crate::types::RunnerConfig {
+            root_path: instance_dir.join("rootfs"),
+            num_vcpus: 1,
+            ram_mib: 256,
+            port_forwards: vec![],
+            net_sock_path: None,
+            virtiofs_mounts: vec![],
+            vsock_ports: vec![],
+            console_log_path: None,
+            log_level: None,
+            interactive: false,
+            tty: false,
+            no_network: false,
+            rlimits: None,
+            detach: false,
+            dax_window_size_bytes: None,
+            image_acceleration: None,
+            gpu: false,
+            gpu_shm_size_bytes: None,
+            gpu_flags: None,
+            sandbox: true,
+        };
+        fs::write(
+            instance_dir.join("runner_config.json"),
+            serde_json::to_string_pretty(&runner_cfg).unwrap(),
+        )
+        .unwrap();
+
+        let vm = VmState {
+            id: "vm-resize-test".to_string(),
+            pid: std::process::id(), // alive process
+            image: "alpine:latest".to_string(),
+            created_at: 4000,
+            port_forwards: vec![],
+            instance_dir: instance_dir.clone(),
+            status: VmStatus::Running,
+            vcpus: Some(1),
+            memory_mib: Some(256),
+        };
+        StateManager::save(dir.path(), &vm).unwrap();
+
+        // Resize both memory and cpus
+        let updated =
+            StateManager::resize(dir.path(), "vm-resize-test", Some(1024), Some(4)).unwrap();
+        assert_eq!(updated.memory_mib, Some(1024));
+        assert_eq!(updated.vcpus, Some(4));
+
+        // Verify config file was updated
+        let cfg_content = fs::read_to_string(instance_dir.join("runner_config.json")).unwrap();
+        let parsed_cfg: crate::types::RunnerConfig = serde_json::from_str(&cfg_content).unwrap();
+        assert_eq!(parsed_cfg.ram_mib, 1024);
+        assert_eq!(parsed_cfg.num_vcpus, 4);
+
+        // Verify find() returns new values
+        let found = StateManager::find(dir.path(), "vm-resize-test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.memory_mib, Some(1024));
+        assert_eq!(found.vcpus, Some(4));
+    }
+
+    #[test]
+    fn test_state_manager_resize_validation_errors() {
+        let dir = tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/vm-resize-val");
+        fs::create_dir_all(&instance_dir).unwrap();
+
+        let vm = VmState {
+            id: "vm-resize-val".to_string(),
+            pid: std::process::id(),
+            image: "alpine:latest".to_string(),
+            created_at: 4000,
+            port_forwards: vec![],
+            instance_dir,
+            status: VmStatus::Running,
+            vcpus: Some(1),
+            memory_mib: Some(256),
+        };
+        StateManager::save(dir.path(), &vm).unwrap();
+
+        // Error: neither memory nor cpus
+        assert!(StateManager::resize(dir.path(), "vm-resize-val", None, None).is_err());
+
+        // Error: memory = 0
+        assert!(StateManager::resize(dir.path(), "vm-resize-val", Some(0), None).is_err());
+
+        // Error: cpus = 0
+        assert!(StateManager::resize(dir.path(), "vm-resize-val", None, Some(0)).is_err());
+
+        // Error: unknown ID
+        assert!(StateManager::resize(dir.path(), "vm-nonexistent", Some(512), None).is_err());
+    }
+
+    #[test]
+    fn test_state_manager_resize_dead_process() {
+        let dir = tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/vm-resize-dead");
+        fs::create_dir_all(&instance_dir).unwrap();
+
+        let vm = VmState {
+            id: "vm-resize-dead".to_string(),
+            pid: 999_997, // dead PID
+            image: "alpine:latest".to_string(),
+            created_at: 4000,
+            port_forwards: vec![],
+            instance_dir,
+            status: VmStatus::Stopped,
+            vcpus: Some(1),
+            memory_mib: Some(256),
+        };
+        StateManager::save(dir.path(), &vm).unwrap();
+
+        let res = StateManager::resize(dir.path(), "vm-resize-dead", Some(1024), None);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("not running"));
     }
 
     #[test]
@@ -737,6 +963,8 @@ mod tests {
             }],
             instance_dir,
             status: VmStatus::Stopped,
+            vcpus: None,
+            memory_mib: None,
         };
         StateManager::save(dir.path(), &vm).unwrap();
 
@@ -772,6 +1000,8 @@ mod tests {
             port_forwards: vec![],
             instance_dir,
             status: VmStatus::Stopped,
+            vcpus: None,
+            memory_mib: None,
         };
         StateManager::save(dir.path(), &vm).unwrap();
 
