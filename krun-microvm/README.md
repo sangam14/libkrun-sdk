@@ -20,6 +20,13 @@
 | **Direct Access (DAX)** | None / manual external blocks | **Native VirtioFS DAX Window (`--dax <size>`)** | Zero-copy mmap of multi-GB LLM weights (GGUF/Safetensors) into guest physical address space |
 | **Image Acceleration** | Full layer tar download & decompression required (~minutes for multi-GB) | **Dragonfly Nydus RAFSv6 Lazy Loading (`--lazy-load`)** | Sub-50ms cold starts with metadata bootstrap; zero-copy on-demand chunk streaming over VirtioFS DAX |
 | **Lifecycle Controls** | SIGKILL / external process kills | **Instant `pause` / `resume` + Declarative CRD** | Freeze and unfreeze microVM vCPUs in single-digit milliseconds; declarative sleep/wake in Kubernetes |
+| **Dynamic Resizing** | Cold restart required | **In-Place CPU & RAM Resizing (`microvm resize`)** | Dynamically adjust vCPUs and memory on running microVMs without reboots; native CRI `Task::update` support |
+| **Host Sandboxing** | Standard container isolation | **Zero-Trust Host Sandboxing (Landlock + `PR_SET_NO_NEW_PRIVS`)** | Restricts hypervisor process capabilities and filesystem access prior to guest execution |
+| **Egress Security** | Open outbound access / complex iptables | **Host-Enforced Egress Proxy (`--allow-host`)** | Default-deny outbound proxy; blocks cloud metadata SSRF (`169.254.169.254`) and unauthorized hosts |
+| **Secret Isolation** | Plaintext secrets in container memory & env | **Zero-Trust In-Flight Substitution (`--secret`)** | Guest only sees placeholder keys (`krun-secret:KEY`); real credentials substituted in-flight by host proxy |
+| **LLM Token Metering** | External API gateways | **Streaming Token Meter & Hard Budgets (`--max-tokens`)** | Enforces hard cumulative token ceilings directly at host proxy; returns 429 Too Many Requests on breach |
+| **Observability** | External stat collectors / cAdvisor | **Native Prometheus 0.0.4 Engine (`microvm metrics`)** | Single-shot and live HTTP scrape server (`--listen`) with per-VM CPU/memory/faults telemetry |
+| **Serverless SDK** | Complex custom Docker/CLI wrappers | **Pure Python SDK with `@task` Decorator** | Seamlessly dispatch Python functions to ephemeral, hardware-isolated microVMs with single decorator |
 | **Kubernetes Integration** | Monolithic external daemons or out-of-tree bridges | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `crictl stats` telemetry |
 
 ---
@@ -79,10 +86,17 @@ libkrun-sdk/
     │   ├── microvm-cli/     # User-facing CLI tool (`microvm`)
     │   ├── containerd-shim-krun/ # containerd v2 shim (`containerd-shim-krun-v2`)
     │   └── krun-operator/   # Pure-Rust Kubernetes Operator (kube-rs)
+    ├── sdks/
+    │   └── python/          # Serverless Python SDK (libkrun_microvm)
+    │       ├── pyproject.toml
+    │       ├── README.md
+    │       ├── libkrun_microvm/ # @task decorator, client, error types
+    │       └── tests/       # Unit test suite for Python SDK
     └── examples/
         ├── run_alpine.rs    # Quick-start SDK example
         ├── run_ai_sandbox.rs # AI Agent CoW sandboxing example
-        └── run_mistral_inference.rs # mistral.rs hardware-isolated LLM inference
+        ├── run_mistral_inference.rs # mistral.rs hardware-isolated LLM inference
+        └── python_sdk_agent.py # Hardware-isolated AI agent with zero-trust networking
 ```
 
 ### Cloning with Submodules
@@ -509,6 +523,124 @@ Connect microVMs directly into Kubernetes CNI network namespaces (Flannel, Calic
 ./target/release/microvm run --net cni:/proc/1234/ns/net alpine:latest -- ip addr
 ```
 
+### 29. Zero-Trust Host Sandboxing (`--no-sandbox`)
+`krun-microvm` applies strict defense-in-depth isolation to the host supervisor process right before entering the VM:
+- **Linux**: Kernel `PR_SET_NO_NEW_PRIVS` prevents privilege escalation via setuid/setgid, paired with Landlock LSM rules restricting filesystem access to only authorized rootfs and mount paths.
+- **macOS**: Strict mount boundary verification ensuring all VirtioFS paths reside within permitted workspaces.
+- Enabled by default on every `run`; use `--no-sandbox` if running in unrestricted debugging environments:
+```bash
+./target/release/microvm run --no-sandbox alpine:latest -- sh
+```
+
+### 30. Dynamic CPU & Memory Runtime Resizing (`microvm resize`)
+Dynamically adjust vCPU count and memory allocation of a running microVM without terminating or rebooting the guest:
+```bash
+# Dynamically scale microVM to 4 vCPUs and 2048 MiB RAM:
+./target/release/microvm resize <vm-id> --cpus 4 --memory 2048
+
+# Inspect updated allocations:
+./target/release/microvm inspect <vm-id>
+```
+
+### 31. Enterprise Prometheus Observability Engine (`microvm metrics`)
+Native Prometheus exposition engine exporting inventory counters, resource gauges, and live per-VM OS telemetry (CPU user/sys seconds, RSS memory, virtual memory, threads, page faults):
+```bash
+# Output instantaneous Prometheus exposition format (version 0.0.4):
+./target/release/microvm metrics
+
+# Standalone HTTP Prometheus scrape endpoint:
+./target/release/microvm metrics --listen 0.0.0.0:9090
+
+# Structured JSON telemetry for custom collectors:
+./target/release/microvm metrics --json
+```
+
+### 32. Host-Enforced Egress Proxy & Domain Allowlisting (`--allow-host`)
+Block data exfiltration and enforce zero-trust network perimeter security. The host proxy operates on a **default-deny** policy, permitting outbound HTTP/HTTPS connections only to explicitly authorized domains and ports:
+```bash
+# Allow only OpenAI and Anthropic API endpoints:
+./target/release/microvm run \
+    --allow-host api.openai.com:443 \
+    --allow-host "*.anthropic.com:443" \
+    python:3.11-slim -- python3 -c "import urllib.request; print(urllib.request.urlopen('https://api.openai.com').status)"
+
+# SSRF and Cloud Metadata Protection:
+# Requests to 169.254.169.254 or metadata.google.internal are strictly rejected with 403 Forbidden!
+```
+
+### 33. Zero-Trust In-Flight Secret Substitution (`--secret`)
+Eliminate plaintext API keys and credentials from guest microVM memory, environment variables, and disk. The guest only sees placeholder values (`krun-secret:<KEY>`); the host proxy substitutes the authentic secret in-flight on outbound HTTP request headers (`Authorization`, `X-Api-Key`) and bodies:
+```bash
+# 1. From host environment variable:
+./target/release/microvm run \
+    --allow-host api.openai.com:443 \
+    --secret OPENAI_API_KEY=env:HOST_OPENAI_KEY \
+    python:3.11-slim -- python3 -c "import os; print('In guest:', os.environ['OPENAI_API_KEY'])"
+# Output in guest: In guest: krun-secret:OPENAI_API_KEY
+
+# 2. From file or direct value:
+./target/release/microvm run \
+    --allow-host api.openai.com:443 \
+    --secret OPENAI_API_KEY=file:/etc/secrets/openai.key \
+    --secret HF_TOKEN=hf_abc123 \
+    python:3.11-slim
+```
+
+### 34. LLM Token Metering & Hard Budgets (`--max-tokens`)
+The host proxy inspects streaming Server-Sent Events (SSE) and JSON responses from OpenAI, Anthropic, and compatible LLM providers, calculating cumulative token consumption in real time:
+```bash
+# Enforce hard ceiling of 50,000 total tokens:
+./target/release/microvm run \
+    --allow-host api.openai.com:443 \
+    --secret OPENAI_API_KEY=env:OPENAI_API_KEY \
+    --max-tokens 50000 \
+    python:3.11-slim -- python3 agent.py
+# Once cumulative tokens hit 50,000, subsequent calls return 429 Too Many Requests (LLM Token Budget Exceeded)!
+```
+
+---
+
+## Serverless Python SDK (`libkrun-microvm`)
+
+The `libkrun-microvm` Python SDK allows developers to dispatch any Python function into an ephemeral, hardware-isolated microVM using the `@task` decorator.
+
+### Installation
+```bash
+pip install -e sdks/python
+```
+
+### Quickstart Example
+```python
+from libkrun_microvm import task, MicroVmBudgetExceededError
+
+@task(
+    image="python:3.11-slim",
+    cpus=2,
+    memory_mb=512,
+    allow_hosts=["api.openai.com:443", "api.anthropic.com:443"],
+    secrets={"OPENAI_API_KEY": "env:OPENAI_API_KEY"},
+    max_tokens=25000,
+)
+def run_autonomous_agent(prompt: str) -> dict:
+    import os, urllib.request
+
+    # Inside the microVM, os.environ["OPENAI_API_KEY"] is "krun-secret:OPENAI_API_KEY"
+    # The host proxy validates the destination and injects the true key in-flight.
+    return {
+        "status": "completed",
+        "prompt": prompt,
+    }
+
+# Execute function inside ephemeral microVM
+try:
+    result = run_autonomous_agent("Audit security configuration")
+    print("Result from microVM:", result)
+except MicroVmBudgetExceededError as e:
+    print("Security policy stopped task: token budget exceeded!", e)
+```
+
+See runnable example in [`examples/python_sdk_agent.py`](examples/python_sdk_agent.py).
+
 ---
 
 
@@ -579,24 +711,30 @@ use microvm_core::MicroVmBuilder;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Build and configure the microVM
-    let mut vm = MicroVmBuilder::new("alpine:latest")
+    // 1. Build and configure the microVM with zero-trust networking
+    let mut vm = MicroVmBuilder::new("python:3.11-slim")
         .cpus(2)
         .memory_mb(512)
         .env("SERVICE_NAME", "auth-worker")
+        .allow_host("api.openai.com:443")
+        .secret("OPENAI_API_KEY", "sk-live-xyz123")
+        .max_tokens(25000)
         .cmd(vec![
-            "/bin/sh".to_string(),
+            "python3".to_string(),
             "-c".to_string(),
-            "echo 'MicroVM started!' && uname -a".to_string(),
+            "print('Hello from hardware-isolated MicroVM!')".to_string(),
         ])
         .run()
         .await?;
 
     println!("MicroVM running with PID {:?}", vm.pid());
+    println!("Host proxy listening on port: {:?}", vm.proxy_port());
 
     // 2. Wait for completion (or call vm.stop().await for graceful shutdown)
     let status = vm.wait().await?;
     println!("VM exited: {status}");
+    println!("Egress blocked requests: {}", vm.egress_blocked_count());
+    println!("Cumulative LLM tokens: {}", vm.llm_tokens_consumed());
 
     Ok(())
 }
