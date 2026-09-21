@@ -97,6 +97,14 @@ pub struct RunnerConfig {
     pub gpu_flags: Option<u32>,
     #[serde(default = "default_true")]
     pub sandbox: bool,
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    #[serde(default)]
+    pub secrets: Vec<(String, String)>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    #[serde(default)]
+    pub proxy_port: Option<u16>,
 }
 
 fn default_true() -> bool {

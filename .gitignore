@@ -16,3 +16,14 @@ Thumbs.db
 .cache/
 **/.cache/
 scratch/
+
+# Python artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+**/*.egg-info/
+dist/
+build/
+.pytest_cache/

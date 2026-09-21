@@ -848,6 +848,10 @@ mod tests {
             gpu_shm_size_bytes: None,
             gpu_flags: None,
             sandbox: true,
+            allow_hosts: vec![],
+            secrets: vec![],
+            max_tokens: None,
+            proxy_port: None,
         };
         fs::write(
             instance_dir.join("runner_config.json"),

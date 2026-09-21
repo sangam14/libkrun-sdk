@@ -133,6 +133,18 @@ pub struct RunArgs {
     #[arg(long = "no-sandbox")]
     pub no_sandbox: bool,
 
+    /// Allow outbound network egress to explicitly permitted destination (e.g. api.openai.com:443, *.github.com:443)
+    #[arg(long = "allow-host")]
+    pub allow_hosts: Vec<String>,
+
+    /// Inject secret via in-flight substitution (KEY=VALUE, KEY=env:VAR_NAME, or KEY=file:/path)
+    #[arg(long = "secret")]
+    pub secrets: Vec<String>,
+
+    /// Hard ceiling on cumulative LLM tokens (prompt + completion) consumed by the microVM
+    #[arg(long = "max-tokens")]
+    pub max_tokens: Option<u64>,
+
     /// Optional command to override ENTRYPOINT/CMD
     #[arg(last = true)]
     pub cmd: Vec<String>,
@@ -454,6 +466,9 @@ async fn main() -> Result<()> {
                 gpu,
                 gpu_shm_size,
                 no_sandbox,
+                allow_hosts,
+                secrets,
+                max_tokens,
                 cmd,
             } = *run;
             let mut builder = if let Some(ref b) = bundle {
@@ -479,6 +494,19 @@ async fn main() -> Result<()> {
                 .detach(detach)
                 .no_network(no_network)
                 .sandbox(!no_sandbox);
+
+            for h in allow_hosts {
+                builder = builder.allow_host(h);
+            }
+
+            for s in secrets {
+                let (k, v) = parse_secret_arg(&s)?;
+                builder = builder.secret(k, v);
+            }
+
+            if let Some(tokens) = max_tokens {
+                builder = builder.max_tokens(tokens);
+            }
 
             if gpu {
                 builder = builder.gpu(true);
@@ -1539,6 +1567,46 @@ fn host_memory_bytes() -> Option<u64> {
     }
 }
 
+fn parse_secret_arg(arg: &str) -> Result<(String, String)> {
+    let (key, value_spec) = arg.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid secret format '{}'. Expected KEY=VALUE, KEY=env:VAR_NAME, or KEY=file:/path",
+            arg
+        )
+    })?;
+
+    let key = key.trim();
+    if key.is_empty() {
+        bail!("Secret key cannot be empty in '{}'", arg);
+    }
+
+    let value = if let Some(env_var) = value_spec.strip_prefix("env:") {
+        std::env::var(env_var).map_err(|_| {
+            anyhow::anyhow!(
+                "Environment variable '{}' for secret '{}' is not set",
+                env_var,
+                key
+            )
+        })?
+    } else if let Some(file_path) = value_spec.strip_prefix("file:") {
+        std::fs::read_to_string(file_path)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read secret file '{}' for secret '{}': {}",
+                    file_path,
+                    key,
+                    e
+                )
+            })?
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
+    } else {
+        value_spec.to_string()
+    };
+
+    Ok((key.to_string(), value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1563,6 +1631,66 @@ mod tests {
             }
             _ => panic!("Expected Commands::Run"),
         }
+    }
+
+    #[test]
+    fn test_cli_parse_egress_and_secrets() {
+        let args = vec![
+            "microvm",
+            "run",
+            "--allow-host",
+            "api.openai.com:443",
+            "--allow-host",
+            "*.anthropic.com:443",
+            "--secret",
+            "OPENAI_API_KEY=sk-test-12345",
+            "--max-tokens",
+            "50000",
+            "python:3.11-slim",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Run(run) => {
+                assert_eq!(
+                    run.allow_hosts,
+                    vec!["api.openai.com:443", "*.anthropic.com:443"]
+                );
+                assert_eq!(run.secrets, vec!["OPENAI_API_KEY=sk-test-12345"]);
+                assert_eq!(run.max_tokens, Some(50000));
+                assert_eq!(run.image, "python:3.11-slim");
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_parse_secret_arg() {
+        // Direct value
+        let (k, v) = parse_secret_arg("FOO=bar").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "bar");
+
+        // Environment variable
+        std::env::set_var("TEST_SECRET_ENV_VAR", "super-secret-token");
+        let (k2, v2) = parse_secret_arg("API_KEY=env:TEST_SECRET_ENV_VAR").unwrap();
+        assert_eq!(k2, "API_KEY");
+        assert_eq!(v2, "super-secret-token");
+
+        // Missing env var
+        assert!(parse_secret_arg("API_KEY=env:NON_EXISTENT_VAR_123456").is_err());
+
+        // File-based
+        let temp_dir = tempfile::tempdir().unwrap();
+        let secret_file = temp_dir.path().join("secret.txt");
+        std::fs::write(&secret_file, "file-token-content\n").unwrap();
+        let arg = format!("FILE_KEY=file:{}", secret_file.display());
+        let (k3, v3) = parse_secret_arg(&arg).unwrap();
+        assert_eq!(k3, "FILE_KEY");
+        assert_eq!(v3, "file-token-content");
+
+        // Invalid format
+        assert!(parse_secret_arg("NO_EQUALS_SIGN").is_err());
+        assert!(parse_secret_arg("=NO_KEY").is_err());
     }
 
     #[test]

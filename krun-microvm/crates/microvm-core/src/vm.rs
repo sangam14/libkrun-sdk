@@ -97,6 +97,9 @@ pub struct MicroVmBuilder {
     gpu_shm_size: Option<u64>,
     gpu_flags: Option<u32>,
     sandbox: bool,
+    allow_hosts: Vec<String>,
+    secrets: Vec<(String, String)>,
+    max_tokens: Option<u64>,
 }
 
 impl MicroVmBuilder {
@@ -136,6 +139,9 @@ impl MicroVmBuilder {
             gpu_shm_size: None,
             gpu_flags: None,
             sandbox: true,
+            allow_hosts: Vec::new(),
+            secrets: Vec::new(),
+            max_tokens: None,
         }
     }
 
@@ -415,6 +421,33 @@ impl MicroVmBuilder {
         self
     }
 
+    /// Restricts outbound network egress to explicitly permitted `host:port` destinations (default-deny egress).
+    pub fn allow_host(mut self, host: impl Into<String>) -> Self {
+        self.allow_hosts.push(host.into());
+        self
+    }
+
+    /// Adds multiple allowed outbound destinations.
+    pub fn allow_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        for h in hosts {
+            self.allow_hosts.push(h.into());
+        }
+        self
+    }
+
+    /// Injects a secret using zero-trust in-flight substitution:
+    /// The guest sees `KEY=krun-secret:KEY`, while the host proxy substitutes the real secret on outbound requests.
+    pub fn secret(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.secrets.push((key.into(), value.into()));
+        self
+    }
+
+    /// Sets a hard ceiling on cumulative LLM tokens (prompt + completion) consumed by the microVM.
+    pub fn max_tokens(mut self, limit: u64) -> Self {
+        self.max_tokens = Some(limit);
+        self
+    }
+
     /// Appends a DNS nameserver (or comma/semicolon-separated nameservers, e.g. "8.8.8.8,1.1.1.1").
     pub fn dns(mut self, dns: impl Into<String>) -> Self {
         self.dns_servers.push(dns.into());
@@ -560,6 +593,9 @@ impl MicroVmBuilder {
         };
         let mut final_env = oci_config.env;
         final_env.extend(self.env_vars);
+        for (k, _) in &self.secrets {
+            final_env.push(format!("{k}=krun-secret:{k}"));
+        }
         let final_workdir = self.workdir.or(oci_config.working_dir);
 
         let krun_cfg = KrunConfig::new(final_cmd, final_env, final_workdir);
@@ -668,6 +704,25 @@ impl MicroVmBuilder {
             crate::net::DnsConfig::write_network_files(&instance_rootfs, &guest_hostname, &[])?;
         }
 
+        // 5e. Start host egress proxy server if filtering, secrets, or token budget are specified
+        let (egress_proxy, proxy_port) = if !self.allow_hosts.is_empty()
+            || !self.secrets.is_empty()
+            || self.max_tokens.is_some()
+        {
+            let policy = crate::net::EgressPolicy::new(self.allow_hosts.clone());
+            let secrets = crate::net::SecretSubstitution::new(&self.secrets);
+            let budget = crate::net::LlmTokenBudget::new(self.max_tokens);
+            let proxy_server =
+                crate::net::EgressProxyServer::start(policy, secrets, budget).await?;
+            let port = proxy_server.port();
+            let url = proxy_server.proxy_url();
+            crate::net::DnsConfig::inject_proxy_environment(&instance_rootfs, &url)?;
+            tracing::info!("Egress proxy active on port {port} for microVM {instance_id}");
+            (Some(proxy_server), Some(port))
+        } else {
+            (None, None)
+        };
+
         // 6. Spawn runner subprocess
         let runner_cfg = RunnerConfig {
             root_path: instance_rootfs,
@@ -690,6 +745,10 @@ impl MicroVmBuilder {
             gpu_shm_size_bytes: self.gpu_shm_size,
             gpu_flags: self.gpu_flags,
             sandbox: self.sandbox,
+            allow_hosts: self.allow_hosts.clone(),
+            secrets: self.secrets.clone(),
+            max_tokens: self.max_tokens,
+            proxy_port,
         };
 
         let runner_cfg_path = instance_dir.join("runner_config.json");
@@ -775,6 +834,7 @@ impl MicroVmBuilder {
             data_dir,
             is_detached: self.detach,
             _raw_guard: raw_guard,
+            _proxy: egress_proxy,
         })
     }
 }
@@ -786,11 +846,27 @@ pub struct MicroVm {
     data_dir: PathBuf,
     is_detached: bool,
     _raw_guard: Option<RawModeGuard>,
+    _proxy: Option<crate::net::EgressProxyServer>,
 }
 
 impl MicroVm {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn proxy_port(&self) -> Option<u16> {
+        self._proxy.as_ref().map(|p| p.port())
+    }
+
+    pub fn egress_blocked_count(&self) -> u64 {
+        self._proxy.as_ref().map(|p| p.blocked_count()).unwrap_or(0)
+    }
+
+    pub fn llm_tokens_consumed(&self) -> u64 {
+        self._proxy
+            .as_ref()
+            .map(|p| p.tokens_consumed())
+            .unwrap_or(0)
     }
 
     pub fn pid(&self) -> Option<u32> {
@@ -1067,5 +1143,24 @@ mod tests {
         assert!(builder.get_gpu());
         assert_eq!(builder.get_gpu_shm_size(), Some(8 * 1024 * 1024 * 1024));
         assert_eq!(builder.gpu_flags, Some(0x40));
+    }
+
+    #[test]
+    fn test_builder_egress_and_secret_config() {
+        let builder = MicroVmBuilder::new("alpine:latest")
+            .allow_host("api.openai.com:443")
+            .allow_host("pypi.org:443")
+            .secret("OPENAI_KEY", "sk-proj-test123")
+            .max_tokens(500_000);
+
+        assert_eq!(
+            builder.allow_hosts,
+            vec!["api.openai.com:443", "pypi.org:443"]
+        );
+        assert_eq!(
+            builder.secrets,
+            vec![("OPENAI_KEY".to_string(), "sk-proj-test123".to_string())]
+        );
+        assert_eq!(builder.max_tokens, Some(500_000));
     }
 }

@@ -105,6 +105,10 @@ mod tests {
             gpu_shm_size_bytes: None,
             gpu_flags: None,
             sandbox: false,
+            allow_hosts: vec![],
+            secrets: vec![],
+            max_tokens: None,
+            proxy_port: None,
         };
 
         assert!(apply_sandbox(&cfg).is_ok());
@@ -133,6 +137,10 @@ mod tests {
             gpu_shm_size_bytes: None,
             gpu_flags: None,
             sandbox: true,
+            allow_hosts: vec![],
+            secrets: vec![],
+            max_tokens: None,
+            proxy_port: None,
         };
 
         assert!(apply_sandbox(&cfg).is_ok());

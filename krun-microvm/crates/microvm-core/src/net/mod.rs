@@ -4,7 +4,10 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+pub mod egress;
+
 pub use crate::types::PortForward;
+pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
 
 /// Network mode for the microVM provider abstraction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -128,6 +131,32 @@ impl DnsConfig {
         let hostname_path = etc_dir.join("hostname");
         fs::write(&hostname_path, format!("{}\n", hostname))
             .with_context(|| format!("Failed to write {}", hostname_path.display()))?;
+
+        Ok(())
+    }
+
+    /// Injects HTTP/HTTPS proxy configuration into guest rootfs (/etc/environment and /etc/profile.d/krun_proxy.sh).
+    pub fn inject_proxy_environment(rootfs: &Path, proxy_url: &str) -> Result<()> {
+        let etc_dir = rootfs.join("etc");
+        fs::create_dir_all(&etc_dir)
+            .with_context(|| format!("Failed to create {}", etc_dir.display()))?;
+
+        // 1. Append to /etc/environment
+        let env_path = etc_dir.join("environment");
+        let mut current_env = fs::read_to_string(&env_path).unwrap_or_default();
+        let proxy_lines = format!(
+            "\nHTTP_PROXY={proxy_url}\nHTTPS_PROXY={proxy_url}\nhttp_proxy={proxy_url}\nhttps_proxy={proxy_url}\nALL_PROXY={proxy_url}\nNO_PROXY=localhost,127.0.0.1\nno_proxy=localhost,127.0.0.1\n"
+        );
+        current_env.push_str(&proxy_lines);
+        fs::write(&env_path, current_env)?;
+
+        // 2. Write /etc/profile.d/krun_proxy.sh
+        let profile_dir = etc_dir.join("profile.d");
+        fs::create_dir_all(&profile_dir)?;
+        let profile_script = format!(
+            "export HTTP_PROXY=\"{proxy_url}\"\nexport HTTPS_PROXY=\"{proxy_url}\"\nexport http_proxy=\"{proxy_url}\"\nexport https_proxy=\"{proxy_url}\"\nexport ALL_PROXY=\"{proxy_url}\"\nexport NO_PROXY=\"localhost,127.0.0.1\"\nexport no_proxy=\"localhost,127.0.0.1\"\n"
+        );
+        fs::write(profile_dir.join("krun_proxy.sh"), profile_script)?;
 
         Ok(())
     }
