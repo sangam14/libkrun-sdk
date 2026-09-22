@@ -85,8 +85,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_network: bool,
 
-    /// Network mode: tsi (default), none (air-gapped), or unix:<socket_path>
-    #[arg(long, default_value = "tsi")]
+    /// Network mode: tsi (default), gvproxy (user-mode virtual network), none (air-gapped), unix:<socket_path>, or cni:<netns_path>
+    #[arg(long, alias = "network", default_value = "tsi")]
     pub net: String,
 
     /// Custom DNS nameservers (e.g. 8.8.8.8,1.1.1.1; defaults to autonomous resilient fallback)
@@ -134,7 +134,7 @@ pub struct RunArgs {
     pub no_sandbox: bool,
 
     /// Allow outbound network egress to explicitly permitted destination (e.g. api.openai.com:443, *.github.com:443)
-    #[arg(long = "allow-host")]
+    #[arg(long = "allow-host", alias = "allow-net")]
     pub allow_hosts: Vec<String>,
 
     /// Inject secret via in-flight substitution (KEY=VALUE, KEY=env:VAR_NAME, or KEY=file:/path)
@@ -657,6 +657,8 @@ async fn main() -> Result<()> {
 
             if no_network || net == "none" {
                 builder = builder.network_mode(microvm_core::NetworkMode::None);
+            } else if net == "gvproxy" {
+                builder = builder.network_mode(microvm_core::NetworkMode::Gvproxy);
             } else if let Some(path_str) = net.strip_prefix("unix:") {
                 builder = builder.network_mode(microvm_core::NetworkMode::UnixStream(
                     PathBuf::from(path_str),

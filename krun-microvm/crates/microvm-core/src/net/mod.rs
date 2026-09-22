@@ -5,9 +5,11 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 pub mod egress;
+pub mod gvproxy;
 
 pub use crate::types::PortForward;
 pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
+pub use gvproxy::{GvproxyConfig, GvproxyInstance};
 
 /// Network mode for the microVM provider abstraction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -16,6 +18,8 @@ pub enum NetworkMode {
     /// Exposes ports according to the port map without needing root.
     #[default]
     Tsi,
+    /// User-mode virtual networking via gvproxy (gvisor-tap-vsock) with virtual DNS, DHCP, and dynamic port forwarding.
+    Gvproxy,
     /// Virtio-net interface connected to an external user-space stream socket (e.g. gvproxy, passt, or CNI socket).
     UnixStream(PathBuf),
     /// Virtio-net connected to a Kubernetes CNI network namespace (e.g., via passt/veth or netns socket).
@@ -30,6 +34,10 @@ pub enum NetworkMode {
 impl NetworkMode {
     pub fn is_cni(&self) -> bool {
         matches!(self, Self::Cni { .. })
+    }
+
+    pub fn is_gvproxy(&self) -> bool {
+        matches!(self, Self::Gvproxy)
     }
 
     pub fn netns_path(&self) -> Option<&Path> {

@@ -4,6 +4,7 @@ members = [
     "crates/microvm-core",
     "crates/microvm-runner",
     "crates/microvm-cli",
+    "crates/libgvproxy-sys",
     "crates/containerd-shim-krun",
     "crates/krun-operator",
 ]
@@ -16,6 +17,7 @@ authors = ["Sangam Biradar <sangam14@users.noreply.github.com>"]
 license = "Apache-2.0"
 
 [workspace.dependencies]
+libgvproxy-sys = { path = "crates/libgvproxy-sys" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.38", features = ["full"] }

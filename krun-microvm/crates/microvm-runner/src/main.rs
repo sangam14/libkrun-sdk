@@ -182,14 +182,35 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
     }
 
     // Configure networking
-    if cfg.no_network {
+    let _gvproxy = if cfg.no_network {
         // Air-gapped isolation: instruct libkrun to expose zero ports and disable network
         let empty_map: Vec<String> = Vec::new();
         ctx.set_port_map(&empty_map)
             .context("Failed to configure air-gapped port map")?;
+        None
+    } else if cfg.gvproxy {
+        let sock_path = cfg
+            .net_sock_path
+            .clone()
+            .unwrap_or_else(|| "/tmp/gvproxy.sock".to_string());
+        eprintln!("[microvm-runner] Spawning in-runner gvproxy user-space network on {sock_path}");
+        let mut gvproxy_cfg = microvm_core::net::GvproxyConfig::new(&sock_path);
+        for pf in &cfg.port_forwards {
+            gvproxy_cfg = gvproxy_cfg.add_forward(pf.host, pf.guest);
+        }
+        for host in &cfg.allow_hosts {
+            gvproxy_cfg = gvproxy_cfg.allow_net(host);
+        }
+        let inst = gvproxy_cfg
+            .start()
+            .context("Failed to start gvproxy network in runner")?;
+        ctx.add_net_unixstream(Some(&sock_path), None)
+            .context("Failed to add virtio-net unixstream for gvproxy")?;
+        Some(inst)
     } else if let Some(ref sock_path) = cfg.net_sock_path {
         ctx.add_net_unixstream(Some(sock_path), None)
             .context("Failed to add virtio-net unixstream")?;
+        None
     } else if !cfg.port_forwards.is_empty() {
         // Use libkrun's built-in TSI with port mapping
         let mappings: Vec<String> = cfg
@@ -199,7 +220,10 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             .collect();
         ctx.set_port_map(&mappings)
             .context("Failed to configure TSI port map")?;
-    }
+        None
+    } else {
+        None
+    };
 
     if let Some(ref acc) = cfg.image_acceleration {
         eprintln!(

@@ -899,6 +899,7 @@ mod tests {
             interactive: false,
             tty: false,
             no_network: false,
+            gvproxy: false,
             netns: None,
             rlimits: None,
             detach: false,

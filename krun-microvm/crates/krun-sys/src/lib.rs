@@ -347,12 +347,13 @@ impl KrunContext {
         let p_path = c_path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
         let raw_fd = fd.unwrap_or(-1);
 
+        let mut mac: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
         let rc = unsafe {
             ffi::krun_add_net_unixstream(
                 self.ctx_id,
                 p_path,
                 raw_fd,
-                std::ptr::null_mut(),
+                mac.as_mut_ptr(),
                 ffi::COMPAT_NET_FEATURES,
                 0,
             )

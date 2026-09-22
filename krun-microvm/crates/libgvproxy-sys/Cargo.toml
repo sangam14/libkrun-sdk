@@ -1,0 +1,15 @@
+[package]
+name = "libgvproxy-sys"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sangam Biradar <sangam14@users.noreply.github.com>"]
+license = "Apache-2.0"
+description = "CGO FFI bindings to gvproxy (gvisor-tap-vsock) user-space virtual network stack"
+links = "gvproxy"
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.10"
+serde_json = "1.0"

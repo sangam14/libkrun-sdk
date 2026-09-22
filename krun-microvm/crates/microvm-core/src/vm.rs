@@ -142,11 +142,41 @@ impl MicroVmBuilder {
         if let Some(lim) = bundle.rlimits {
             builder = builder.rlimits(lim);
         }
-        if let Some(netns) = bundle.netns_path {
+        let network_annotation = bundle.spec.annotations().as_ref().and_then(|a| {
+            a.get("krun.network")
+                .or_else(|| a.get("io.katacontainers.config.hypervisor.network_model"))
+        });
+
+        if let Some(net_model) = network_annotation {
+            if net_model == "gvproxy" {
+                builder = builder.network_mode(crate::net::NetworkMode::Gvproxy);
+            } else if net_model == "tsi" {
+                builder = builder.network_mode(crate::net::NetworkMode::Tsi);
+            } else if net_model == "none" {
+                builder = builder.network_mode(crate::net::NetworkMode::None);
+            }
+        } else if let Some(netns) = bundle.netns_path {
             builder = builder.network_mode(crate::net::NetworkMode::Cni {
                 netns,
                 socket_path: None,
             });
+        } else {
+            // Default to gvproxy for rootless / desktop execution when CNI netns is omitted
+            builder = builder.network_mode(crate::net::NetworkMode::Gvproxy);
+        }
+
+        if let Some(allow_str) = bundle
+            .spec
+            .annotations()
+            .as_ref()
+            .and_then(|a| a.get("krun.network.allow"))
+        {
+            for target in allow_str.split(',') {
+                let trimmed = target.trim();
+                if !trimmed.is_empty() {
+                    builder = builder.allow_host(trimmed);
+                }
+            }
         }
         builder.rootfs_override = Some(bundle.rootfs_path);
         builder.bundle_dir = Some(bundle.bundle_dir);
@@ -458,7 +488,7 @@ impl MicroVmBuilder {
                     }
                 }
             }
-            crate::net::NetworkMode::Tsi => {
+            crate::net::NetworkMode::Tsi | crate::net::NetworkMode::Gvproxy => {
                 self.no_network = false;
                 self.net_sock_path = None;
             }
@@ -653,8 +683,31 @@ impl MicroVmBuilder {
                 }
             }
 
+            if self.network_mode.is_gvproxy() && !final_cmd.is_empty() {
+                let init_script = r#"#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+ip link set eth0 up 2>/dev/null || true
+(udhcpc -i eth0 -q -n -t 2 || (ip addr add 192.168.127.2/24 dev eth0 && ip route add default via 192.168.127.1)) 2>/dev/null || true
+exec "$@"
+"#;
+                let script_path = instance_rootfs.join("krun-init.sh");
+                let _ = std::fs::write(&script_path, init_script);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &script_path,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
+                final_cmd.insert(0, "/krun-init.sh".to_string());
+            }
+
             let mut final_env = oci_config.env;
             final_env.extend(self.env_vars);
+            if self.network_mode.is_gvproxy() {
+                final_env.push("KRUN_DHCP=1".to_string());
+            }
             for (k, _) in &self.secrets {
                 final_env.push(format!("{k}=krun-secret:{k}"));
             }
@@ -786,6 +839,16 @@ impl MicroVmBuilder {
             (None, None)
         };
 
+        // 5c. Setup user-mode gvproxy path if requested
+        let final_net_sock_path = if self.network_mode.is_gvproxy() {
+            let gvproxy_sock = instance_dir.join("gvproxy.sock");
+            Some(gvproxy_sock.to_string_lossy().to_string())
+        } else if let Some(p) = self.network_mode.unix_socket_path() {
+            Some(p.to_string_lossy().to_string())
+        } else {
+            self.net_sock_path.clone()
+        };
+
         // 6. Spawn runner subprocess
         let runner_cfg = RunnerConfig {
             root_path: instance_rootfs,
@@ -794,7 +857,7 @@ impl MicroVmBuilder {
             boot_payload: self.boot_payload.clone(),
             disks: self.disks.clone(),
             port_forwards: self.port_forwards.clone(),
-            net_sock_path: self.net_sock_path,
+            net_sock_path: final_net_sock_path,
             virtiofs_mounts: final_virtiofs_mounts,
             vsock_ports: self.vsock_ports,
             console_log_path: final_console_log.clone(),
@@ -802,6 +865,7 @@ impl MicroVmBuilder {
             interactive: self.interactive,
             tty: self.tty,
             no_network: self.no_network,
+            gvproxy: self.network_mode.is_gvproxy(),
             netns: self.network_mode.netns_path().map(|p| p.to_path_buf()),
             rlimits: self.rlimits,
             detach: self.detach,
@@ -863,6 +927,7 @@ impl MicroVmBuilder {
                     Ok(())
                 });
             }
+        } else {
             if self.interactive || self.tty {
                 cmd.stdin(std::process::Stdio::inherit());
             } else {
@@ -941,6 +1006,7 @@ impl MicroVmBuilder {
             supervisor_sock,
             _raw_guard: raw_guard,
             _proxy: egress_proxy,
+            _gvproxy: None,
         })
     }
 }
@@ -954,6 +1020,7 @@ pub struct MicroVm {
     supervisor_sock: PathBuf,
     _raw_guard: Option<RawModeGuard>,
     _proxy: Option<crate::net::EgressProxyServer>,
+    _gvproxy: Option<crate::net::GvproxyInstance>,
 }
 
 impl MicroVm {
@@ -963,6 +1030,10 @@ impl MicroVm {
 
     pub fn proxy_port(&self) -> Option<u16> {
         self._proxy.as_ref().map(|p| p.port())
+    }
+
+    pub fn gvproxy(&self) -> Option<&crate::net::GvproxyInstance> {
+        self._gvproxy.as_ref()
     }
 
     pub fn egress_blocked_count(&self) -> u64 {
