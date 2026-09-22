@@ -622,7 +622,7 @@ impl MicroVmBuilder {
             }
 
             // 4. Resolve Cmd, Env, and write /.krun_config.json
-            let final_cmd = if self.cmd_override.is_some() {
+            let mut final_cmd = if self.cmd_override.is_some() {
                 oci_config.resolve_cmd(self.cmd_override)
             } else if !self.env_vars.is_empty() && oci_config.cmd.is_empty() {
                 // If created from bundle, cmd is already stored or defaults
@@ -630,6 +630,29 @@ impl MicroVmBuilder {
             } else {
                 oci_config.resolve_cmd(self.cmd_override)
             };
+
+            // If the command binary is not an absolute path, resolve it against standard guest rootfs PATH
+            if let Some(first) = final_cmd.first_mut() {
+                if !first.starts_with('/') {
+                    let search_paths = [
+                        "/usr/local/sbin",
+                        "/usr/local/bin",
+                        "/usr/sbin",
+                        "/usr/bin",
+                        "/sbin",
+                        "/bin",
+                    ];
+                    for sp in search_paths {
+                        let rel = sp.trim_start_matches('/');
+                        let candidate = instance_rootfs.join(rel).join(&first);
+                        if candidate.exists() {
+                            *first = format!("{sp}/{first}");
+                            break;
+                        }
+                    }
+                }
+            }
+
             let mut final_env = oci_config.env;
             final_env.extend(self.env_vars);
             for (k, _) in &self.secrets {
@@ -840,8 +863,11 @@ impl MicroVmBuilder {
                     Ok(())
                 });
             }
-        } else if self.interactive || self.tty {
-            cmd.stdin(std::process::Stdio::inherit());
+            if self.interactive || self.tty {
+                cmd.stdin(std::process::Stdio::inherit());
+            } else {
+                cmd.stdin(std::process::Stdio::null());
+            }
             cmd.stdout(std::process::Stdio::inherit());
             cmd.stderr(std::process::Stdio::inherit());
         }
