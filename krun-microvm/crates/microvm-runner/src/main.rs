@@ -99,6 +99,39 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         let _ = krun_sys::set_log_level(level);
     }
 
+    // On Linux, if a CNI network namespace is specified, join it via setns prior to VM initialization
+    #[cfg(target_os = "linux")]
+    if let Some(ref netns_path) = cfg.netns {
+        if netns_path.exists() {
+            match std::fs::File::open(netns_path) {
+                Ok(file) => {
+                    use std::os::unix::io::AsRawFd;
+                    unsafe {
+                        if libc::setns(file.as_raw_fd(), libc::CLONE_NEWNET) != 0 {
+                            eprintln!(
+                                "[microvm-runner] Warning: setns to CNI netns {} failed: {}",
+                                netns_path.display(),
+                                std::io::Error::last_os_error()
+                            );
+                        } else {
+                            eprintln!(
+                                "[microvm-runner] Successfully joined CNI network namespace {}",
+                                netns_path.display()
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[microvm-runner] Warning: Failed to open CNI netns {}: {}",
+                        netns_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     let mut ctx = KrunContext::create().context("Failed to create libkrun context")?;
 
     ctx.set_vm_config(cfg.num_vcpus, cfg.ram_mib)

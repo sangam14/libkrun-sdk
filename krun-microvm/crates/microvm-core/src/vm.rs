@@ -779,6 +779,7 @@ impl MicroVmBuilder {
             interactive: self.interactive,
             tty: self.tty,
             no_network: self.no_network,
+            netns: self.network_mode.netns_path().map(|p| p.to_path_buf()),
             rlimits: self.rlimits,
             detach: self.detach,
             dax_window_size_bytes: self.dax_window_size,

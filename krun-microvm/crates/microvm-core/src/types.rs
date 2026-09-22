@@ -137,6 +137,8 @@ pub struct RunnerConfig {
     #[serde(default)]
     pub no_network: bool,
     #[serde(default)]
+    pub netns: Option<PathBuf>,
+    #[serde(default)]
     pub rlimits: Option<String>,
     #[serde(default)]
     pub detach: bool,

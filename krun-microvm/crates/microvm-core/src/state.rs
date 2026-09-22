@@ -899,6 +899,7 @@ mod tests {
             interactive: false,
             tty: false,
             no_network: false,
+            netns: None,
             rlimits: None,
             detach: false,
             dax_window_size_bytes: None,
