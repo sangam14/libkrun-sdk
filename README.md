@@ -28,7 +28,10 @@
 | **Secret Isolation** | Plaintext secrets in container memory & env | In-guest plaintext env vars | **Zero-Trust In-Flight Substitution (`--secret`)** | Guest only sees placeholder keys (`krun-secret:KEY`); real credentials substituted in-flight by host proxy |
 | **LLM Token Metering** | External API gateways | N/A | **Streaming Token Meter & Hard Budgets (`--max-tokens`)** | Enforces hard cumulative token ceilings directly at host proxy; returns 429 Too Many Requests on breach |
 | **Observability** | External stat collectors | REST API polling | **Native Prometheus 0.0.4 Engine (`microvm metrics`)** | Single-shot and live HTTP scrape server (`--listen`) with per-VM CPU/memory/faults telemetry |
-| **Serverless SDK** | Complex custom Docker/CLI wrappers | Firecracker API wrappers | **Pure Python SDK with `@task` Decorator** | Seamlessly dispatch Python functions to ephemeral, hardware-isolated microVMs with single decorator |
+| **Multi-Boot Engines** | Containers only or kernel only | Linux bzImage only | **Universal Multi-Boot (Containers, Direct Kernels, UEFI Firmware, Unikernels)** | Boot OCI containers, raw Linux/BSD bzImages, UEFI firmware (EDK2), or lightweight unikernels (Unikraft, Nanos) with raw VirtIO block disks |
+| **Hypervisor Resilience** | Prone to kqueue aborts & SMP crash | Linux KVM only | **Battle-Tested Resilience (HVF Panic Interceptor, Safe Console Pipe, Signal TTY Recovery)** | Traps Apple Silicon HVF multi-vCPU PSCI shutdown panics; prevents kqueue epoll assertion aborts on non-pollable stdin; async-signal-safe terminal restore |
+| **AI Agent Sandboxing** | Manual container configs | Manual VMs | **Automated Zero-Trust Agent Sandbox (`microvm sandbox <agent>`)** | One-command sandboxing for Claude, Gemini, and Codex with CoW host repository clones, API allowlisting, secret proxying, and token budgeting |
+| **Multi-Language SDKs** | Go only or raw CLI wrappers | Python/Go REST clients | **Multi-Language Client SDKs (Rust, Python, TypeScript, Go)** | Native crates, Python `@task` serverless decorator, TypeScript/Node `@libkrun/sdk`, and Go `krun-sdk-go` |
 | **Kubernetes CRI** | Monolithic external daemons | `firecracker-containerd` (Go) | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `Task::stats` telemetry |
 
 ---
@@ -91,11 +94,9 @@ libkrun-sdk/
     │   ├── containerd-shim-krun/ # containerd v2 shim (`containerd-shim-krun-v2`)
     │   └── krun-operator/   # Pure-Rust Kubernetes Operator (kube-rs)
     ├── sdks/
-    │   └── python/          # Serverless Python SDK (libkrun_microvm)
-    │       ├── pyproject.toml
-    │       ├── README.md
-    │       ├── libkrun_microvm/ # @task decorator, client, error types
-    │       └── tests/       # Unit test suite for Python SDK
+    │   ├── python/          # Serverless Python SDK (libkrun_microvm)
+    │   ├── typescript/      # Modern Node / TypeScript Client SDK (@libkrun/sdk)
+    │   └── go/              # Pure Go MicroVM Client SDK (krun-sdk-go)
     └── examples/
         ├── run_alpine.rs    # Quick-start SDK example
         ├── run_ai_sandbox.rs # AI Agent CoW sandboxing example
@@ -504,18 +505,67 @@ microvm run \
 # Once cumulative tokens hit 50,000, subsequent calls return 429 Too Many Requests (LLM Token Budget Exceeded)!
 ```
 
+### 32. Multi-Boot Engine: Direct Linux Kernels, UEFI Firmware & Raw Disks (`--kernel`, `--initrd`, `--firmware`, `--disk`)
+Beyond OCI containers, `libkrun-sdk` natively boots custom Linux kernels (bzImage/vmlinux), UEFI firmware payloads (e.g. EDK2/OVMF), and raw VirtIO block disks with custom kernel cmdlines:
+```bash
+# Direct kernel boot with initrd and raw disk:
+microvm run \
+    --kernel /boot/vmlinuz-6.12 \
+    --initrd /boot/initrd.img \
+    --cmdline "console=ttyS0 root=/dev/vda rw earlyprintk=serial,ttyS0" \
+    --disk /var/lib/disks/rootfs.raw:rw \
+    --disk /var/lib/disks/data.img:ro
+
+# UEFI firmware boot:
+microvm run \
+    --firmware /usr/share/OVMF/OVMF_CODE.fd \
+    --disk /var/lib/disks/os.raw:rw
+```
+
+### 33. Unikernel Execution (`microvm unikernel`)
+Execute specialized, ultra-minimal unikernel binaries (Unikraft, Nanos, OSv) with sub-10ms boots, bypassing general-purpose operating system layers:
+```bash
+# Run a compiled unikernel with optional parameters and block disk:
+microvm unikernel /opt/unikernels/nginx.bin \
+    --params "netdev.ipv4_addr=192.168.1.2" \
+    --disk /opt/unikernels/www.raw:ro \
+    --cpus 1 --memory 128
+```
+
+### 34. Autonomous AI Coding Agent Sandboxes (`microvm sandbox`)
+Launch pre-configured, zero-trust isolated environments tailored for autonomous AI coding agents (**Claude Code**, **Google Gemini Code Assist**, **OpenAI Codex**). Automatically mounts your local project via CoW (Copy-on-Write) APFS/FICLONE, restricts egress exclusively to authorized vendor APIs and GitHub, and transparently proxies authentication credentials:
+```bash
+# Launch a Claude Code sandbox with CoW isolation on current workspace:
+microvm sandbox claude \
+    --workspace . \
+    --secret ANTHROPIC_API_KEY=env:ANTHROPIC_API_KEY \
+    --max-tokens 100000
+
+# Launch a Gemini agent sandbox:
+microvm sandbox gemini \
+    --workspace . \
+    --secret GEMINI_API_KEY=env:GEMINI_API_KEY
+
+# Launch a Codex agent sandbox cloning a remote repository directly into CoW:
+microvm sandbox codex \
+    --repo https://github.com/org/repo.git \
+    --secret OPENAI_API_KEY=env:OPENAI_API_KEY
+```
+
 ---
 
-## Serverless Python SDK (`libkrun-microvm`)
+## Multi-Language Client SDKs
 
-The `libkrun-microvm` Python SDK allows developers to dispatch any Python function into an ephemeral, hardware-isolated microVM using the `@task` decorator.
+`libkrun-sdk` provides official client SDKs across **Python**, **TypeScript/Node.js**, and **Go**, enabling seamless integration into any application stack.
 
-### Installation
+### 1. Serverless Python SDK (`libkrun-microvm`)
+
+The `libkrun-microvm` Python SDK allows developers to dispatch any Python function into an ephemeral, hardware-isolated microVM using the `@task` decorator:
+
 ```bash
 pip install -e krun-microvm/sdks/python
 ```
 
-### Quickstart Example
 ```python
 from libkrun_microvm import task, MicroVmBudgetExceededError
 
@@ -529,15 +579,8 @@ from libkrun_microvm import task, MicroVmBudgetExceededError
 )
 def run_autonomous_agent(prompt: str) -> dict:
     import os, urllib.request
+    return {"status": "completed", "prompt": prompt}
 
-    # Inside the microVM, os.environ["OPENAI_API_KEY"] is "krun-secret:OPENAI_API_KEY"
-    # The host proxy validates the destination and injects the true key in-flight.
-    return {
-        "status": "completed",
-        "prompt": prompt,
-    }
-
-# Execute function inside ephemeral microVM
 try:
     result = run_autonomous_agent("Audit security configuration")
     print("Result from microVM:", result)
@@ -545,7 +588,85 @@ except MicroVmBudgetExceededError as e:
     print("Security policy stopped task: token budget exceeded!", e)
 ```
 
-See runnable example in [`krun-microvm/examples/python_sdk_agent.py`](krun-microvm/examples/python_sdk_agent.py).
+### 2. Modern TypeScript / Node SDK (`@libkrun/sdk`)
+
+Native Node.js / TypeScript client for orchestrating microVMs, streaming logs, executing commands via the framed binary protocol, and enforcing egress security:
+
+```bash
+npm install @libkrun/sdk
+```
+
+```typescript
+import { MicroVm } from "@libkrun/sdk";
+
+const vm = new MicroVm({
+  image: "node:20-slim",
+  cpus: 2,
+  memoryMb: 1024,
+  allowHosts: ["api.anthropic.com:443", "github.com:443"],
+  secrets: { ANTHROPIC_API_KEY: "env:ANTHROPIC_API_KEY" },
+  workspaceCow: "./src:workspace",
+});
+
+await vm.start(["node", "-e", "console.log('Running in isolated MicroVM')"]);
+const exitCode = await vm.wait();
+console.log(`VM exited with status ${exitCode}`);
+```
+
+### 3. Pure Go Client SDK (`krun-sdk-go`)
+
+Type-safe Go client with zero CGO dependencies for serverless platforms, edge runtimes, and microVM orchestration:
+
+```bash
+go get github.com/sangam14/libkrun-sdk/sdk/go
+```
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/sangam14/libkrun-sdk/sdk/go"
+)
+
+func main() {
+    ctx := context.Background()
+    vm, err := microvm.New(microvm.Config{
+        Image:      "alpine:latest",
+        Cpus:       2,
+        MemoryMb:   512,
+        AllowHosts: []string{"api.openai.com:443"},
+        Secrets:    map[string]string{"OPENAI_API_KEY": "env:HOST_KEY"},
+        Cmd:        []string{"echo", "Hello from Go SDK MicroVM!"},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    if err := vm.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    exitCode, err := vm.Wait(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("MicroVM finished with code: %d\n", exitCode)
+}
+```
+
+---
+
+## Battle-Tested Hypervisor Resilience & In-Guest Protocol
+
+`libkrun-sdk` incorporates critical battle-tested hypervisor stability workarounds:
+1. **Apple Silicon HVF Multi-vCPU Panic Watchdog**: Traps macOS `Hypervisor.framework` PSCI `CPU_OFF` shutdown crashes (`src/hvf/src/lib.rs:549: Unexpected val=...`) and cleanly transitions the host supervisor to exit code 0.
+2. **Safe Non-Pollable Console Pipe**: Replaces non-pollable stdin descriptors (`/dev/null` or closed pipes) with an internal OS pipe in non-interactive / daemon modes, preventing fatal `kqueue / epoll` assertion failures (`left == right failed, left: -1`).
+3. **Async-Signal-Safe Terminal Restoration**: Installs global signal handlers (`SIGINT`, `SIGTERM`, `SIGHUP`) with guaranteed `tcsetattr` restoration and `ONLCR` output post-processing restoration.
+4. **Framed In-Guest Execution Protocol**: High-throughput multiplexed TCP/vsock execution framing (`CH_STDIN=0`, `CH_STDOUT=1`, `CH_STDERR=2`, `CH_EXIT=3`, `CH_WINSZ=4`) with length-prefixed chunks for seamless integration with in-guest agents.
 
 ---
 

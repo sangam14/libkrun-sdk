@@ -12,42 +12,9 @@ use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::process::{Child, Command};
 
-pub struct RawModeGuard {
-    orig_termios: Option<nix::sys::termios::Termios>,
-}
+use crate::tty::RawModeGuard;
 
-impl RawModeGuard {
-    pub fn new() -> Result<Self> {
-        use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
-        use std::os::fd::AsRawFd;
-
-        let stdin = std::io::stdin();
-        let is_tty = unsafe { libc::isatty(stdin.as_raw_fd()) == 1 };
-
-        if !is_tty {
-            return Ok(Self { orig_termios: None });
-        }
-
-        let orig = tcgetattr(&stdin)?;
-        let mut raw = orig.clone();
-        cfmakeraw(&mut raw);
-        tcsetattr(&stdin, SetArg::TCSANOW, &raw)?;
-
-        Ok(Self {
-            orig_termios: Some(orig),
-        })
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        if let Some(ref orig) = self.orig_termios {
-            use nix::sys::termios::{tcsetattr, SetArg};
-            let stdin = std::io::stdin();
-            let _ = tcsetattr(&stdin, SetArg::TCSANOW, orig);
-        }
-    }
-}
+static INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct ArtifactMount {
@@ -100,6 +67,8 @@ pub struct MicroVmBuilder {
     allow_hosts: Vec<String>,
     secrets: Vec<(String, String)>,
     max_tokens: Option<u64>,
+    boot_payload: Option<crate::types::BootPayload>,
+    disks: Vec<crate::types::DiskAttachment>,
 }
 
 impl MicroVmBuilder {
@@ -142,6 +111,8 @@ impl MicroVmBuilder {
             allow_hosts: Vec::new(),
             secrets: Vec::new(),
             max_tokens: None,
+            boot_payload: None,
+            disks: Vec::new(),
         }
     }
 
@@ -496,6 +467,65 @@ impl MicroVmBuilder {
         self
     }
 
+    /// Sets explicit multi-boot payload configuration.
+    pub fn boot_payload(mut self, payload: crate::types::BootPayload) -> Self {
+        self.boot_payload = Some(payload);
+        self
+    }
+
+    /// Configures direct kernel boot (e.g. Linux direct bzImage/ELF, NetBSD, FreeBSD Firecracker kernel).
+    pub fn kernel(
+        mut self,
+        kernel_path: impl Into<PathBuf>,
+        initramfs: Option<PathBuf>,
+        cmdline: Option<String>,
+    ) -> Self {
+        self.boot_payload = Some(crate::types::BootPayload::Kernel(
+            crate::types::KernelPayload {
+                kernel_path: kernel_path.into(),
+                kernel_format: krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF,
+                initramfs,
+                cmdline,
+            },
+        ));
+        self
+    }
+
+    /// Configures UEFI firmware boot (e.g. booting full disk images via EDK2 / KRUN_EFI.fd).
+    pub fn firmware(mut self, firmware_path: impl Into<PathBuf>) -> Self {
+        self.boot_payload = Some(crate::types::BootPayload::Firmware(
+            crate::types::FirmwarePayload {
+                firmware_path: firmware_path.into(),
+            },
+        ));
+        self
+    }
+
+    /// Configures unikernel boot (e.g. Unikraft, Nanos, OSv, Solo5/Mirage).
+    pub fn unikernel(mut self, kernel_path: impl Into<PathBuf>, cmdline: Option<String>) -> Self {
+        self.boot_payload = Some(crate::types::BootPayload::Unikernel(
+            crate::types::KernelPayload {
+                kernel_path: kernel_path.into(),
+                kernel_format: krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF,
+                initramfs: None,
+                cmdline,
+            },
+        ));
+        self
+    }
+
+    /// Attaches an additional block disk device to the microVM.
+    pub fn disk(
+        mut self,
+        id: impl Into<String>,
+        path: impl Into<PathBuf>,
+        read_only: bool,
+    ) -> Self {
+        self.disks
+            .push(crate::types::DiskAttachment::new(id, path, read_only));
+        self
+    }
+
     /// Pulls the image (if not cached), creates a CoW rootfs snapshot, prepares .krun_config.json,
     /// and spawns the microVM runner subprocess.
     pub async fn run(self) -> Result<MicroVm> {
@@ -515,91 +545,101 @@ impl MicroVmBuilder {
             }
         }
 
-        // 2. Resolve rootfs (from bundle, local OCI layout, or OCI client pull)
-        let (cached_rootfs, oci_config) = if let Some(ref custom_rootfs) = self.rootfs_override {
-            let empty_cfg = crate::config::OciConfig {
-                entrypoint: Vec::new(),
-                cmd: Vec::new(),
-                env: Vec::new(),
-                working_dir: None,
-                user: None,
-            };
-            (custom_rootfs.clone(), empty_cfg)
-        } else {
-            let reference = ImageReference::parse(&self.image)?;
-            if reference.is_local_layout {
-                let layout_path = reference.layout_path.as_ref().unwrap();
-                tracing::info!(
-                    "Loading image from local OCI layout at {} (tag: {})...",
-                    layout_path.display(),
-                    reference.tag
-                );
-                crate::oci::OciLayout::load(layout_path, Some(&reference.tag), &data_dir)?
-            } else {
-                let oci_client = OciClient::new();
-                tracing::info!(
-                    "Ensuring image '{}' is ready...",
-                    reference.canonical_name()
-                );
-                oci_client.pull_and_unpack(&reference, &data_dir).await?
-            }
-        };
-
-        // 3. Create unique instance directory & CoW clone rootfs
-        let instance_id = format!(
-            "vm-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis()
+        let is_direct_boot = matches!(
+            self.boot_payload,
+            Some(crate::types::BootPayload::Kernel(_))
+                | Some(crate::types::BootPayload::Firmware(_))
+                | Some(crate::types::BootPayload::Unikernel(_))
         );
+
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let millis = now.as_millis();
+        let nanos = now.subsec_nanos();
+        let counter = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let instance_id = format!("vm-{millis}-{nanos:06}-{counter:03}");
         let instance_dir = data_dir.join("instances").join(&instance_id);
         let instance_rootfs = instance_dir.join("rootfs");
 
-        tracing::info!("Cloning rootfs to instance {} (CoW)...", instance_id);
-        clone_rootfs(&cached_rootfs, &instance_rootfs)
-            .context("Failed to perform CoW clone of rootfs")?;
-
-        // 3b. Inject single-file mounts (e.g. Kubernetes ConfigMaps, Secrets, projected service account tokens)
-        for (src, dest) in &self.file_mounts {
-            let relative_dest = dest.strip_prefix("/").unwrap_or(dest);
-            let target_path = instance_rootfs.join(relative_dest);
-            if let Some(parent) = target_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(e) = fs::copy(src, &target_path) {
-                tracing::warn!(
-                    "Failed to copy file mount from {} to {}: {}",
-                    src.display(),
-                    target_path.display(),
-                    e
-                );
-            } else {
-                tracing::debug!(
-                    "Injected file mount {} -> {}",
-                    src.display(),
-                    target_path.display()
-                );
-            }
-        }
-
-        // 4. Resolve Cmd, Env, and write /.krun_config.json
-        let final_cmd = if self.cmd_override.is_some() {
-            oci_config.resolve_cmd(self.cmd_override)
-        } else if !self.env_vars.is_empty() && oci_config.cmd.is_empty() {
-            // If created from bundle, cmd is already stored or defaults
-            oci_config.resolve_cmd(self.cmd_override)
+        if is_direct_boot {
+            let _ = fs::create_dir_all(&instance_rootfs);
         } else {
-            oci_config.resolve_cmd(self.cmd_override)
-        };
-        let mut final_env = oci_config.env;
-        final_env.extend(self.env_vars);
-        for (k, _) in &self.secrets {
-            final_env.push(format!("{k}=krun-secret:{k}"));
-        }
-        let final_workdir = self.workdir.or(oci_config.working_dir);
+            // 2. Resolve rootfs (from bundle, local OCI layout, or OCI client pull)
+            let (cached_rootfs, oci_config) = if let Some(ref custom_rootfs) = self.rootfs_override
+            {
+                let empty_cfg = crate::config::OciConfig {
+                    entrypoint: Vec::new(),
+                    cmd: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                    user: None,
+                };
+                (custom_rootfs.clone(), empty_cfg)
+            } else {
+                let reference = ImageReference::parse(&self.image)?;
+                if reference.is_local_layout {
+                    let layout_path = reference.layout_path.as_ref().unwrap();
+                    tracing::info!(
+                        "Loading image from local OCI layout at {} (tag: {})...",
+                        layout_path.display(),
+                        reference.tag
+                    );
+                    crate::oci::OciLayout::load(layout_path, Some(&reference.tag), &data_dir)?
+                } else {
+                    let oci_client = OciClient::new();
+                    tracing::info!(
+                        "Ensuring image '{}' is ready...",
+                        reference.canonical_name()
+                    );
+                    oci_client.pull_and_unpack(&reference, &data_dir).await?
+                }
+            };
 
-        let krun_cfg = KrunConfig::new(final_cmd, final_env, final_workdir);
-        krun_cfg.write_to(&instance_rootfs)?;
+            tracing::info!("Cloning rootfs to instance {} (CoW)...", instance_id);
+            clone_rootfs(&cached_rootfs, &instance_rootfs)
+                .context("Failed to perform CoW clone of rootfs")?;
+
+            // 3b. Inject single-file mounts (e.g. Kubernetes ConfigMaps, Secrets, projected service account tokens)
+            for (src, dest) in &self.file_mounts {
+                let relative_dest = dest.strip_prefix("/").unwrap_or(dest);
+                let target_path = instance_rootfs.join(relative_dest);
+                if let Some(parent) = target_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::copy(src, &target_path) {
+                    tracing::warn!(
+                        "Failed to copy file mount from {} to {}: {}",
+                        src.display(),
+                        target_path.display(),
+                        e
+                    );
+                } else {
+                    tracing::debug!(
+                        "Injected file mount {} -> {}",
+                        src.display(),
+                        target_path.display()
+                    );
+                }
+            }
+
+            // 4. Resolve Cmd, Env, and write /.krun_config.json
+            let final_cmd = if self.cmd_override.is_some() {
+                oci_config.resolve_cmd(self.cmd_override)
+            } else if !self.env_vars.is_empty() && oci_config.cmd.is_empty() {
+                // If created from bundle, cmd is already stored or defaults
+                oci_config.resolve_cmd(self.cmd_override)
+            } else {
+                oci_config.resolve_cmd(self.cmd_override)
+            };
+            let mut final_env = oci_config.env;
+            final_env.extend(self.env_vars);
+            for (k, _) in &self.secrets {
+                final_env.push(format!("{k}=krun-secret:{k}"));
+            }
+            let final_workdir = self.workdir.or(oci_config.working_dir);
+
+            let krun_cfg = KrunConfig::new(final_cmd, final_env, final_workdir);
+            krun_cfg.write_to(&instance_rootfs)?;
+        }
 
         // 5. Locate runner binary (auto-codesigns if on macOS)
         let runner_binary = match self.runner_path {
@@ -728,6 +768,8 @@ impl MicroVmBuilder {
             root_path: instance_rootfs,
             num_vcpus: self.vcpus,
             ram_mib: self.ram_mib,
+            boot_payload: self.boot_payload.clone(),
+            disks: self.disks.clone(),
             port_forwards: self.port_forwards.clone(),
             net_sock_path: self.net_sock_path,
             virtiofs_mounts: final_virtiofs_mounts,
@@ -749,8 +791,10 @@ impl MicroVmBuilder {
             secrets: self.secrets.clone(),
             max_tokens: self.max_tokens,
             proxy_port,
+            supervisor_sock_path: Some(instance_dir.join("supervisor.sock")),
         };
 
+        let supervisor_sock = instance_dir.join("supervisor.sock");
         let runner_cfg_path = instance_dir.join("runner_config.json");
         let cfg_json = serde_json::to_string_pretty(&runner_cfg)?;
         std::fs::write(&runner_cfg_path, &cfg_json)?;
@@ -765,6 +809,9 @@ impl MicroVmBuilder {
 
         let mut cmd = Command::new(&runner_binary);
         cmd.arg("--config").arg(&runner_cfg_path);
+        if !self.detach {
+            cmd.kill_on_drop(true);
+        }
 
         if self.detach {
             cmd.stdin(std::process::Stdio::null());
@@ -804,9 +851,40 @@ impl MicroVmBuilder {
             None
         };
 
-        let child = cmd.spawn().with_context(|| {
+        let mut child = cmd.spawn().with_context(|| {
             format!("Failed to spawn runner binary {}", runner_binary.display())
         })?;
+
+        // Wait briefly for supervisor socket readiness (with fallback if runner runs non-socket mode)
+        let connect_timeout = Duration::from_secs(3);
+        let start_time = std::time::Instant::now();
+        let mut supervisor_ready = false;
+        while start_time.elapsed() < connect_timeout {
+            if supervisor_sock.exists() {
+                if let Ok(mut stream) = tokio::net::UnixStream::connect(&supervisor_sock).await {
+                    if let Ok(Ok(msg)) = tokio::time::timeout(
+                        Duration::from_millis(500),
+                        crate::protocol::read_frame_async(&mut stream),
+                    )
+                    .await
+                    {
+                        if matches!(msg.payload, crate::protocol::MessagePayload::Ready { .. }) {
+                            supervisor_ready = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                bail!("microvm-runner exited prematurely with status: {status}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !supervisor_ready {
+            tracing::debug!(
+                "Supervisor socket did not signal Ready within timeout; proceeding in fallback mode"
+            );
+        }
 
         let pid = child.id().unwrap_or(0);
         let now = std::time::SystemTime::now()
@@ -833,6 +911,7 @@ impl MicroVmBuilder {
             instance_dir,
             data_dir,
             is_detached: self.detach,
+            supervisor_sock,
             _raw_guard: raw_guard,
             _proxy: egress_proxy,
         })
@@ -845,6 +924,7 @@ pub struct MicroVm {
     instance_dir: PathBuf,
     data_dir: PathBuf,
     is_detached: bool,
+    supervisor_sock: PathBuf,
     _raw_guard: Option<RawModeGuard>,
     _proxy: Option<crate::net::EgressProxyServer>,
 }
@@ -888,12 +968,141 @@ impl MicroVm {
         Ok(status)
     }
 
-    /// Gracefully stops the microVM (SIGTERM with fallback to SIGKILL).
+    /// Asynchronously waits for the microVM to exit within the specified timeout.
+    ///
+    /// If the timeout expires before the VM halts, initiates a graceful stop (`stop()`)
+    /// and returns a timeout error.
+    pub async fn wait_timeout(&mut self, timeout: Duration) -> Result<ExitStatus> {
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(status_res) => {
+                let status = status_res?;
+                self.cleanup();
+                Ok(status)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "MicroVM '{}' exceeded timeout of {:?}; terminating...",
+                    self.id,
+                    timeout
+                );
+                let _ = self.stop().await;
+                bail!(
+                    "MicroVM '{}' execution timed out after {:?}",
+                    self.id,
+                    timeout
+                );
+            }
+        }
+    }
+
+    pub fn supervisor_sock_path(&self) -> &Path {
+        &self.supervisor_sock
+    }
+
+    /// Sends a heartbeat ping to the supervisor and measures round-trip latency.
+    pub async fn ping(&self) -> Result<Duration> {
+        if !self.supervisor_sock.exists() {
+            bail!("Supervisor socket does not exist");
+        }
+        let mut stream = tokio::net::UnixStream::connect(&self.supervisor_sock).await?;
+        let ping_msg =
+            crate::protocol::ControlMessage::new(1, crate::protocol::MessagePayload::Ping);
+        let start = std::time::Instant::now();
+        crate::protocol::write_frame_async(&mut stream, &ping_msg).await?;
+        let resp = tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::protocol::read_frame_async(&mut stream),
+        )
+        .await
+        .context("Ping timed out")??;
+        let elapsed = start.elapsed();
+        if matches!(resp.payload, crate::protocol::MessagePayload::Pong { .. }) {
+            Ok(elapsed)
+        } else {
+            bail!("Unexpected response to Ping: {:?}", resp.payload);
+        }
+    }
+
+    /// Queries the supervisor process for live resource usage statistics.
+    pub async fn stats(&self) -> Result<crate::metrics::ProcessStats> {
+        if self.supervisor_sock.exists() {
+            if let Ok(mut stream) = tokio::net::UnixStream::connect(&self.supervisor_sock).await {
+                let stats_msg =
+                    crate::protocol::ControlMessage::new(1, crate::protocol::MessagePayload::Stats);
+                if crate::protocol::write_frame_async(&mut stream, &stats_msg)
+                    .await
+                    .is_ok()
+                {
+                    if let Ok(Ok(resp)) = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        crate::protocol::read_frame_async(&mut stream),
+                    )
+                    .await
+                    {
+                        if let crate::protocol::MessagePayload::StatsResponse(s) = resp.payload {
+                            return Ok(s);
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback to host process inspection
+        let pid = self.pid().unwrap_or(0);
+        crate::metrics::collect_process_stats(pid)
+            .context("Failed to collect host process telemetry")
+    }
+
+    /// Suspends vCPUs and pauses the microVM.
+    pub async fn pause(&mut self) -> Result<()> {
+        if self.supervisor_sock.exists() {
+            if let Ok(mut stream) = tokio::net::UnixStream::connect(&self.supervisor_sock).await {
+                let pause_msg =
+                    crate::protocol::ControlMessage::new(1, crate::protocol::MessagePayload::Pause);
+                let _ = crate::protocol::write_frame_async(&mut stream, &pause_msg).await;
+            }
+        } else if let Some(pid) = self.pid() {
+            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP);
+        }
+        let _ = crate::state::StateManager::pause(&self.data_dir, &self.id);
+        Ok(())
+    }
+
+    /// Resumes suspended vCPUs and unpauses the microVM.
+    pub async fn resume(&mut self) -> Result<()> {
+        if self.supervisor_sock.exists() {
+            if let Ok(mut stream) = tokio::net::UnixStream::connect(&self.supervisor_sock).await {
+                let resume_msg = crate::protocol::ControlMessage::new(
+                    1,
+                    crate::protocol::MessagePayload::Resume,
+                );
+                let _ = crate::protocol::write_frame_async(&mut stream, &resume_msg).await;
+            }
+        } else if let Some(pid) = self.pid() {
+            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT);
+        }
+        let _ = crate::state::StateManager::resume(&self.data_dir, &self.id);
+        Ok(())
+    }
+
+    /// Gracefully stops the microVM (via supervisor socket with fallback to SIGTERM and SIGKILL).
     pub async fn stop(&mut self) -> Result<()> {
+        // 1. Try graceful stop over supervisor socket
+        if self.supervisor_sock.exists() {
+            if let Ok(mut stream) = tokio::net::UnixStream::connect(&self.supervisor_sock).await {
+                let stop_msg = crate::protocol::ControlMessage::new(
+                    1,
+                    crate::protocol::MessagePayload::Stop {
+                        timeout_secs: 5,
+                        force: false,
+                    },
+                );
+                let _ = crate::protocol::write_frame_async(&mut stream, &stop_msg).await;
+            }
+        }
+
+        // 2. Poll for termination or fallback to OS signals
         if let Some(pid) = self.pid() {
             let nix_pid = Pid::from_raw(pid as i32);
-            let _ = signal::kill(nix_pid, Signal::SIGTERM);
-
             let timeout = Duration::from_secs(5);
             let start = std::time::Instant::now();
 
@@ -902,7 +1111,18 @@ impl MicroVm {
                     self.cleanup();
                     return Ok(());
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // Fallback to SIGTERM if still running
+            let _ = signal::kill(nix_pid, Signal::SIGTERM);
+            let term_start = std::time::Instant::now();
+            while term_start.elapsed() < Duration::from_secs(2) {
+                if !self.is_alive() {
+                    self.cleanup();
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             // Force kill if not stopped
@@ -1162,5 +1382,80 @@ mod tests {
             vec![("OPENAI_KEY".to_string(), "sk-proj-test123".to_string())]
         );
         assert_eq!(builder.max_tokens, Some(500_000));
+    }
+
+    #[test]
+    fn test_builder_multi_boot_config() {
+        let kernel_vm = MicroVmBuilder::new("")
+            .kernel(
+                "/boot/vmlinuz",
+                Some(PathBuf::from("/boot/initrd")),
+                Some("console=ttyS0".to_string()),
+            )
+            .disk("disk0", "/dev/vda.raw", false);
+
+        match kernel_vm.boot_payload.as_ref().unwrap() {
+            crate::types::BootPayload::Kernel(k) => {
+                assert_eq!(k.kernel_path, PathBuf::from("/boot/vmlinuz"));
+                assert_eq!(k.initramfs, Some(PathBuf::from("/boot/initrd")));
+                assert_eq!(k.cmdline, Some("console=ttyS0".to_string()));
+            }
+            _ => panic!("Expected BootPayload::Kernel"),
+        }
+        assert_eq!(kernel_vm.disks.len(), 1);
+        assert_eq!(kernel_vm.disks[0].id, "disk0");
+
+        let fw_vm = MicroVmBuilder::new("").firmware("/opt/homebrew/share/libkrun/KRUN_EFI.fd");
+        match fw_vm.boot_payload.as_ref().unwrap() {
+            crate::types::BootPayload::Firmware(f) => {
+                assert_eq!(
+                    f.firmware_path,
+                    PathBuf::from("/opt/homebrew/share/libkrun/KRUN_EFI.fd")
+                );
+            }
+            _ => panic!("Expected BootPayload::Firmware"),
+        }
+
+        let unikernel_vm =
+            MicroVmBuilder::new("").unikernel("app.unikraft", Some("ip=192.168.1.5".to_string()));
+        match unikernel_vm.boot_payload.as_ref().unwrap() {
+            crate::types::BootPayload::Unikernel(u) => {
+                assert_eq!(u.kernel_path, PathBuf::from("app.unikraft"));
+                assert_eq!(u.cmdline, Some("ip=192.168.1.5".to_string()));
+            }
+            _ => panic!("Expected BootPayload::Unikernel"),
+        }
+    }
+
+    #[test]
+    fn test_concurrent_instance_id_uniqueness() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let ids = Arc::new(Mutex::new(HashSet::new()));
+        let mut handles = Vec::new();
+
+        for _ in 0..50 {
+            let ids_clone = Arc::clone(&ids);
+            handles.push(thread::spawn(move || {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap();
+                let millis = now.as_millis();
+                let nanos = now.subsec_nanos();
+                let counter = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let id = format!("vm-{millis}-{nanos:06}-{counter:03}");
+                let mut set = ids_clone.lock().unwrap();
+                assert!(!set.contains(&id), "Duplicate instance ID generated: {id}");
+                set.insert(id);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(ids.lock().unwrap().len(), 50);
     }
 }

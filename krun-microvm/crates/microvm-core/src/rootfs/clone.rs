@@ -6,6 +6,7 @@ use std::path::Path;
 mod darwin {
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int};
+    use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
 
     const CLONE_NOFOLLOW: u32 = 0x0001;
@@ -15,8 +16,10 @@ mod darwin {
     }
 
     pub fn clone_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
-        let src_c = CString::new(src.to_string_lossy().as_bytes())?;
-        let dst_c = CString::new(dst.to_string_lossy().as_bytes())?;
+        let src_c = CString::new(src.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let dst_c = CString::new(dst.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
         let rc = unsafe { clonefile(src_c.as_ptr(), dst_c.as_ptr(), CLONE_NOFOLLOW) };
         if rc == 0 {

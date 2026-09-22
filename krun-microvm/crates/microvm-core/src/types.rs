@@ -57,12 +57,67 @@ impl VsockPort {
     }
 }
 
+/// Block disk device attachment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskAttachment {
+    pub id: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl DiskAttachment {
+    pub fn new(id: impl Into<String>, path: impl Into<PathBuf>, read_only: bool) -> Self {
+        Self {
+            id: id.into(),
+            path: path.into(),
+            read_only,
+        }
+    }
+}
+
+/// Payload specification for direct kernel boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelPayload {
+    pub kernel_path: PathBuf,
+    #[serde(default)]
+    pub kernel_format: u32,
+    #[serde(default)]
+    pub initramfs: Option<PathBuf>,
+    #[serde(default)]
+    pub cmdline: Option<String>,
+}
+
+/// Payload specification for UEFI firmware boot (e.g. FreeBSD/NetBSD with KRUN_EFI.fd).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirmwarePayload {
+    pub firmware_path: PathBuf,
+}
+
+/// Multi-boot payload configuration for the microVM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode")]
+pub enum BootPayload {
+    #[serde(rename = "oci")]
+    Oci,
+    #[serde(rename = "kernel")]
+    Kernel(KernelPayload),
+    #[serde(rename = "firmware")]
+    Firmware(FirmwarePayload),
+    #[serde(rename = "unikernel")]
+    Unikernel(KernelPayload),
+}
+
 /// Configuration passed to microvm-runner as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerConfig {
     pub root_path: PathBuf,
     pub num_vcpus: u8,
     pub ram_mib: u32,
+    #[serde(default)]
+    pub boot_payload: Option<BootPayload>,
+    #[serde(default)]
+    pub disks: Vec<DiskAttachment>,
     #[serde(default)]
     pub port_forwards: Vec<PortForward>,
     #[serde(default)]
@@ -105,6 +160,8 @@ pub struct RunnerConfig {
     pub max_tokens: Option<u64>,
     #[serde(default)]
     pub proxy_port: Option<u16>,
+    #[serde(default)]
+    pub supervisor_sock_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {

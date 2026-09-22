@@ -84,6 +84,17 @@ impl ExecResponse {
     }
 }
 
+// Frame channels matching the in-guest exec agent
+pub const CH_STDIN: u8 = 0;
+pub const CH_STDOUT: u8 = 1;
+pub const CH_STDERR: u8 = 2;
+pub const CH_EXIT: u8 = 3;
+pub const CH_WINSZ: u8 = 4;
+
+/// Maximum allowed response size from the in-guest agent (64 MiB).
+/// Prevents a malicious or buggy agent from causing OOM via oversized length prefix.
+const MAX_RESPONSE_SIZE: usize = 64 * 1024 * 1024;
+
 /// Executes a command in a live microVM given its instance rootfs directory and vsock socket.
 pub async fn exec_in_microvm(
     socket_path: &Path,
@@ -94,7 +105,20 @@ pub async fn exec_in_microvm(
         bail!("Exec command cannot be empty");
     }
 
-    // 1. If the vsock socket is actively listening on the host, communicate via vsock protocol
+    // 1. Check if an in-guest agent port file exists (e.g. forwarded by TSI or network manager)
+    let instance_dir = socket_path.parent().unwrap_or(rootfs_path);
+    let agent_port_file = instance_dir.join("agent.port");
+    if agent_port_file.exists() {
+        if let Ok(port_str) = std::fs::read_to_string(&agent_port_file) {
+            if let Ok(port) = port_str.trim().parse::<u16>() {
+                if let Ok(resp) = exec_via_tcp_agent("127.0.0.1", port, req).await {
+                    return Ok(resp);
+                }
+            }
+        }
+    }
+
+    // 2. If the vsock socket is actively listening on the host, communicate via vsock protocol
     if socket_path.exists() {
         if let Ok(mut stream) = tokio::net::UnixStream::connect(socket_path).await {
             let req_bytes = serde_json::to_vec(req)?;
@@ -107,6 +131,9 @@ pub async fn exec_in_microvm(
             let mut resp_len_buf = [0u8; 4];
             if stream.read_exact(&mut resp_len_buf).await.is_ok() {
                 let resp_len = u32::from_be_bytes(resp_len_buf) as usize;
+                if resp_len > MAX_RESPONSE_SIZE {
+                    bail!("Guest agent response too large ({resp_len} bytes, max {MAX_RESPONSE_SIZE})");
+                }
                 let mut resp_buf = vec![0u8; resp_len];
                 if stream.read_exact(&mut resp_buf).await.is_ok() {
                     if let Ok(resp) = serde_json::from_slice::<ExecResponse>(&resp_buf) {
@@ -117,8 +144,36 @@ pub async fn exec_in_microvm(
         }
     }
 
-    // 2. Direct guest rootfs execution fallback
+    // 3. Direct guest rootfs execution fallback
     exec_in_guest_rootfs(rootfs_path, req).await
+}
+
+/// Executes a command via the in-guest TCP agent over loopback.
+pub async fn exec_via_tcp_agent(host: &str, port: u16, req: &ExecRequest) -> Result<ExecResponse> {
+    use tokio::net::TcpStream;
+    let mut stream = TcpStream::connect((host, port))
+        .await
+        .with_context(|| format!("Failed to connect to guest agent at {host}:{port}"))?;
+    stream.set_nodelay(true)?;
+
+    let req_bytes = serde_json::to_vec(req)?;
+    let len_prefix = (req_bytes.len() as u32).to_be_bytes();
+    stream.write_all(&len_prefix).await?;
+    stream.write_all(&req_bytes).await?;
+    stream.flush().await?;
+
+    let mut resp_len_buf = [0u8; 4];
+    stream.read_exact(&mut resp_len_buf).await?;
+    let resp_len = u32::from_be_bytes(resp_len_buf) as usize;
+    if resp_len > MAX_RESPONSE_SIZE {
+        bail!("Guest agent response too large ({resp_len} bytes, max {MAX_RESPONSE_SIZE})");
+    }
+    let mut resp_buf = vec![0u8; resp_len];
+    stream.read_exact(&mut resp_buf).await?;
+
+    let resp = serde_json::from_slice::<ExecResponse>(&resp_buf)
+        .context("Failed to deserialize agent exec response")?;
+    Ok(resp)
 }
 
 /// Executes a command directly within the isolated instance rootfs.

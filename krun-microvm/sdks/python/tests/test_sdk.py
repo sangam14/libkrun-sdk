@@ -3,8 +3,11 @@
 import base64
 import os
 import pickle
+import sys
 import unittest
 from unittest.mock import patch, MagicMock
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from libkrun_microvm.client import build_run_args, find_microvm_binary
 from libkrun_microvm.exceptions import (

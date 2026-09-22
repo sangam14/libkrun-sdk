@@ -132,7 +132,33 @@ _Bool krun_check_nested_virt(void) {
     return 0;
 }
 
+int krun_add_disk(unsigned int ctx_id, const char *block_id, const char *disk_path, _Bool read_only) {
+    (void)ctx_id; (void)block_id; (void)disk_path; (void)read_only;
+    return 0;
+}
+
+int krun_set_kernel(unsigned int ctx_id, const char *kernel_path, unsigned int kernel_format, const char *initramfs, const char *cmdline) {
+    (void)ctx_id; (void)kernel_path; (void)kernel_format; (void)initramfs; (void)cmdline;
+    return 0;
+}
+
+int krun_set_firmware(unsigned int ctx_id, const char *firmware_path) {
+    (void)ctx_id; (void)firmware_path;
+    return 0;
+}
+
+int krun_disable_implicit_console(unsigned int ctx_id) {
+    (void)ctx_id;
+    return 0;
+}
+
+int krun_add_serial_console_default(unsigned int ctx_id, int input_fd, int output_fd) {
+    (void)ctx_id; (void)input_fd; (void)output_fd;
+    return 0;
+}
+
 int krun_start_enter(unsigned int ctx_id) {
     (void)ctx_id;
     return 0;
 }
+

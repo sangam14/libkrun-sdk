@@ -1,0 +1,32 @@
+{
+  "name": "@libkrun/sdk",
+  "version": "0.1.0",
+  "description": "Pure TypeScript SDK for running hardware-isolated microVMs with libkrun",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "microvm",
+    "libkrun",
+    "virtualization",
+    "hypervisor",
+    "apple-silicon",
+    "kvm"
+  ],
+  "author": "Antigravity Team",
+  "license": "Apache-2.0"
+}

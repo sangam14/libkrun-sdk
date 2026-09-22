@@ -6,8 +6,10 @@ pub mod metrics;
 pub mod net;
 pub mod oci;
 pub mod preflight;
+pub mod protocol;
 pub mod rootfs;
 pub mod state;
+pub mod tty;
 pub mod types;
 pub mod vm;
 
@@ -22,7 +24,12 @@ pub use net::{
 };
 pub use oci::{ArtifactMetadata, ImageReference, OciArtifact, OciClient, OciLayout};
 pub use preflight::{CheckResult, Preflight};
+pub use protocol::{ControlMessage, MessagePayload, CURRENT_PROTOCOL_VERSION};
 pub use rootfs::clone_rootfs;
 pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
-pub use types::{PortForward, RunnerConfig, VirtioFsMount, VsockPort};
+pub use tty::RawModeGuard;
+pub use types::{
+    BootPayload, DiskAttachment, FirmwarePayload, KernelPayload, PortForward, RunnerConfig,
+    VirtioFsMount, VsockPort,
+};
 pub use vm::{MicroVm, MicroVmBuilder};

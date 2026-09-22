@@ -58,6 +58,46 @@ impl Default for OciClient {
     }
 }
 
+pub(crate) struct FileLock {
+    file: std::fs::File,
+}
+
+impl FileLock {
+    pub(crate) fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
+                bail!(
+                    "Failed to acquire advisory lock on {}: {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+static STAGING_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl OciClient {
     pub fn new() -> Self {
         Self {
@@ -212,7 +252,13 @@ impl OciClient {
             .join("configs")
             .join(format!("{}.json", safe_digest));
 
-        // Cache hit check
+        // Acquire advisory lock to deduplicate concurrent pulls of this image
+        let lock_path = cache_base
+            .join("locks")
+            .join(format!("{}.lock", safe_digest));
+        let _lock = FileLock::acquire(&lock_path)?;
+
+        // Cache hit check after acquiring lock
         if rootfs_dir.exists() && config_file.exists() {
             let config_data = fs::read_to_string(&config_file)?;
             if let Ok(cfg) = serde_json::from_str::<OciConfig>(&config_data) {
@@ -221,7 +267,7 @@ impl OciClient {
             }
         }
 
-        // 2. Fetch OCI Config blob
+        // 2. Fetch OCI Config blob (verifies digest)
         let config_bytes = self
             .fetch_blob(reference, &manifest.config.digest, token_ref)
             .await?;
@@ -230,8 +276,12 @@ impl OciClient {
 
         let oci_config = parse_oci_config_from_json(&full_config);
 
-        // 3. Unpack layers into staging rootfs
-        let staging_rootfs = cache_base.join("staging").join(&safe_digest);
+        // 3. Unpack layers into isolated staging rootfs
+        let counter = STAGING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let staging_rootfs = cache_base
+            .join("staging")
+            .join(format!("{safe_digest}_{pid}_{counter}"));
         if staging_rootfs.exists() {
             let _ = fs::remove_dir_all(&staging_rootfs);
         }
@@ -249,9 +299,34 @@ impl OciClient {
                 manifest.layers.len(),
                 layer.digest
             );
-            let blob_bytes = self
-                .fetch_blob_bytes(reference, &layer.digest, token_ref)
-                .await?;
+
+            let layer_hash = layer
+                .digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&layer.digest);
+            let blob_cache_file = cache_base.join("blobs").join("sha256").join(layer_hash);
+
+            let blob_bytes = if blob_cache_file.exists() {
+                tracing::debug!("Layer blob cache hit: {}", layer.digest);
+                bytes::Bytes::from(std::fs::read(&blob_cache_file)?)
+            } else {
+                let downloaded = self
+                    .fetch_blob_bytes(reference, &layer.digest, token_ref)
+                    .await?;
+                if let Some(parent) = blob_cache_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let temp_blob = cache_base
+                    .join("staging")
+                    .join(format!("blob_{layer_hash}_{pid}_{counter}.tmp"));
+                if let Some(parent) = temp_blob.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&temp_blob, &downloaded).is_ok() {
+                    let _ = std::fs::rename(&temp_blob, &blob_cache_file);
+                }
+                downloaded
+            };
 
             let cursor = std::io::Cursor::new(blob_bytes);
             extract_layer(cursor, &staging_rootfs, true)?;
@@ -280,9 +355,15 @@ impl OciClient {
         reference: &ImageReference,
         token: Option<&str>,
     ) -> Result<(SingleManifest, String)> {
+        let target_tag_or_digest = if let Some(ref d) = reference.digest {
+            d.as_str()
+        } else {
+            reference.tag.as_str()
+        };
+
         let manifest_url = format!(
             "https://{}/v2/{}/manifests/{}",
-            reference.registry, reference.repository, reference.tag
+            reference.registry, reference.repository, target_tag_or_digest
         );
 
         let mut headers = self.auth_headers(token);
@@ -308,6 +389,17 @@ impl OciClient {
 
         let body_bytes = resp.bytes().await?;
         let digest_str = format!("sha256:{:x}", Sha256::digest(&body_bytes));
+
+        // If pinned by digest, verify digest matches
+        if let Some(ref expected_digest) = reference.digest {
+            if &digest_str != expected_digest && target_tag_or_digest.starts_with("sha256:") {
+                bail!(
+                    "Cryptographic digest mismatch for manifest: expected {}, got {}",
+                    expected_digest,
+                    digest_str
+                );
+            }
+        }
 
         // Check if this is an image index / multi-arch manifest list
         if let Ok(index) = serde_json::from_slice::<ManifestIndex>(&body_bytes) {
@@ -384,6 +476,19 @@ impl OciClient {
         }
 
         let bytes = resp.bytes().await?;
+
+        // Cryptographically verify SHA-256 digest of downloaded payload
+        if let Some(expected_hex) = digest.strip_prefix("sha256:") {
+            let actual_hex = format!("{:x}", Sha256::digest(&bytes));
+            if actual_hex != expected_hex {
+                bail!(
+                    "Cryptographic digest mismatch for blob: expected sha256:{}, got sha256:{}",
+                    expected_hex,
+                    actual_hex
+                );
+            }
+        }
+
         Ok(bytes)
     }
 }
@@ -442,6 +547,7 @@ pub(crate) fn parse_oci_config_from_json(json: &serde_json::Value) -> OciConfig 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn test_parse_www_authenticate_header() {
@@ -462,5 +568,52 @@ mod tests {
         }
         assert_eq!(realm.as_deref(), Some("https://quay.io/v2/auth"));
         assert_eq!(service.as_deref(), Some("quay.io"));
+    }
+
+    #[test]
+    fn test_file_lock_lifecycle() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lock_file = temp_dir.path().join("test.lock");
+
+        // 1. Acquire lock
+        let lock1 = FileLock::acquire(&lock_file).expect("Failed to acquire first lock");
+
+        // 2. Attempt non-blocking lock from another FD -> should fail
+        let file2 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_file)
+            .unwrap();
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            let ret = libc::flock(file2.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
+            assert_ne!(ret, 0, "Second non-blocking lock should fail while held");
+        }
+
+        // 3. Drop lock1
+        drop(lock1);
+
+        // 4. Now acquiring lock again should succeed
+        let _lock3 =
+            FileLock::acquire(&lock_file).expect("Should acquire lock after previous was dropped");
+    }
+
+    #[test]
+    fn test_parse_oci_config() {
+        let json = serde_json::json!({
+            "config": {
+                "Entrypoint": ["/bin/sh", "-c"],
+                "Cmd": ["echo hello"],
+                "Env": ["PATH=/usr/bin:/bin", "FOO=BAR"],
+                "WorkingDir": "/workspace",
+                "User": "1000:1000"
+            }
+        });
+        let parsed = parse_oci_config_from_json(&json);
+        assert_eq!(parsed.entrypoint, vec!["/bin/sh", "-c"]);
+        assert_eq!(parsed.cmd, vec!["echo hello"]);
+        assert_eq!(parsed.env, vec!["PATH=/usr/bin:/bin", "FOO=BAR"]);
+        assert_eq!(parsed.working_dir, Some("/workspace".to_string()));
+        assert_eq!(parsed.user, Some("1000:1000".to_string()));
     }
 }

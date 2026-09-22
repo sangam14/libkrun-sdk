@@ -194,13 +194,33 @@ impl StateManager {
             return Ok(vm);
         }
 
-        unsafe {
-            if libc::kill(vm.pid as i32, libc::SIGSTOP) != 0 {
-                bail!(
-                    "Failed to send SIGSTOP to process {}: {}",
-                    vm.pid,
-                    std::io::Error::last_os_error()
-                );
+        let sock_path = vm.instance_dir.join("supervisor.sock");
+        let mut ipc_success = false;
+        if sock_path.exists() {
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let msg =
+                    crate::protocol::ControlMessage::new(1, crate::protocol::MessagePayload::Pause);
+                if crate::protocol::write_frame_sync(&mut stream, &msg).is_ok() {
+                    if let Ok(ack) = crate::protocol::read_frame_sync(&mut stream) {
+                        if matches!(ack.payload, crate::protocol::MessagePayload::Ack { .. }) {
+                            ipc_success = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !ipc_success {
+            unsafe {
+                if libc::kill(vm.pid as i32, libc::SIGSTOP) != 0 {
+                    bail!(
+                        "Failed to send SIGSTOP to process {}: {}",
+                        vm.pid,
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
 
@@ -219,13 +239,39 @@ impl StateManager {
             bail!("Cannot resume microVM '{}': process is not running", vm.id);
         }
 
-        unsafe {
-            if libc::kill(vm.pid as i32, libc::SIGCONT) != 0 {
-                bail!(
-                    "Failed to send SIGCONT to process {}: {}",
-                    vm.pid,
-                    std::io::Error::last_os_error()
+        if vm.pid == 0 || vm.pid > i32::MAX as u32 {
+            bail!("Cannot resume microVM '{}': invalid PID {}", vm.id, vm.pid);
+        }
+
+        let sock_path = vm.instance_dir.join("supervisor.sock");
+        let mut ipc_success = false;
+        if sock_path.exists() {
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let msg = crate::protocol::ControlMessage::new(
+                    1,
+                    crate::protocol::MessagePayload::Resume,
                 );
+                if crate::protocol::write_frame_sync(&mut stream, &msg).is_ok() {
+                    if let Ok(ack) = crate::protocol::read_frame_sync(&mut stream) {
+                        if matches!(ack.payload, crate::protocol::MessagePayload::Ack { .. }) {
+                            ipc_success = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !ipc_success {
+            unsafe {
+                if libc::kill(vm.pid as i32, libc::SIGCONT) != 0 {
+                    bail!(
+                        "Failed to send SIGCONT to process {}: {}",
+                        vm.pid,
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
 
@@ -313,10 +359,12 @@ impl StateManager {
                     vm.pid
                 );
             }
-            unsafe {
-                libc::kill(vm.pid as i32, libc::SIGKILL);
+            if vm.pid > 0 && vm.pid <= i32::MAX as u32 {
+                unsafe {
+                    libc::kill(vm.pid as i32, libc::SIGKILL);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         Self::remove(data_dir, &vm.id)?;
@@ -333,7 +381,7 @@ impl StateManager {
             None => bail!("MicroVM with ID or PID '{}' not found", id_or_pid),
         };
 
-        if vm.is_process_alive() {
+        if vm.is_process_alive() && vm.pid > 0 && vm.pid <= i32::MAX as u32 {
             unsafe {
                 libc::kill(vm.pid as i32, libc::SIGTERM);
             }
@@ -412,8 +460,10 @@ impl StateManager {
             })
             .ok_or_else(|| anyhow::anyhow!("MicroVM '{}' not found", id_or_pid))?;
 
-        let clean_guest_path = guest_rel_path.trim_start_matches('/');
-        let target_guest = vm.instance_dir.join("rootfs").join(clean_guest_path);
+        let rootfs = vm.instance_dir.join("rootfs");
+        let target_guest =
+            crate::rootfs::tar_security::sanitize_tar_path(&rootfs, Path::new(guest_rel_path))?;
+        crate::rootfs::tar_security::ensure_no_symlink_parents(&rootfs, &target_guest)?;
 
         if src_host.is_dir() {
             copy_dir_all(src_host, &target_guest)?;
@@ -441,10 +491,17 @@ impl StateManager {
             })
             .ok_or_else(|| anyhow::anyhow!("MicroVM '{}' not found", id_or_pid))?;
 
-        let clean_guest_path = guest_rel_path.trim_start_matches('/');
-        let src_guest = vm.instance_dir.join("rootfs").join(clean_guest_path);
+        let rootfs = vm.instance_dir.join("rootfs");
+        let src_guest =
+            crate::rootfs::tar_security::sanitize_tar_path(&rootfs, Path::new(guest_rel_path))?;
+        crate::rootfs::tar_security::ensure_no_symlink_parents(&rootfs, &src_guest)?;
 
-        if !src_guest.exists() {
+        if src_guest.is_symlink() {
+            let target = fs::read_link(&src_guest)?;
+            crate::rootfs::tar_security::validate_symlink_target(&rootfs, &src_guest, &target)?;
+        }
+
+        if !src_guest.exists() && !src_guest.is_symlink() {
             bail!(
                 "Path '{}' not found inside microVM '{}'",
                 guest_rel_path,
@@ -831,6 +888,8 @@ mod tests {
             root_path: instance_dir.join("rootfs"),
             num_vcpus: 1,
             ram_mib: 256,
+            boot_payload: None,
+            disks: vec![],
             port_forwards: vec![],
             net_sock_path: None,
             virtiofs_mounts: vec![],
@@ -852,6 +911,7 @@ mod tests {
             secrets: vec![],
             max_tokens: None,
             proxy_port: None,
+            supervisor_sock_path: None,
         };
         fs::write(
             instance_dir.join("runner_config.json"),

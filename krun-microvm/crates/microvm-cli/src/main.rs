@@ -145,6 +145,26 @@ pub struct RunArgs {
     #[arg(long = "max-tokens")]
     pub max_tokens: Option<u64>,
 
+    /// Direct kernel boot: path to kernel binary (ELF, RAW, bzImage)
+    #[arg(long = "kernel")]
+    pub kernel: Option<PathBuf>,
+
+    /// Direct kernel boot: optional initramfs/initrd path
+    #[arg(long = "initrd")]
+    pub initrd: Option<PathBuf>,
+
+    /// Direct kernel boot: kernel command line arguments
+    #[arg(long = "cmdline")]
+    pub cmdline: Option<String>,
+
+    /// UEFI firmware boot: path to firmware blob (e.g. KRUN_EFI.fd)
+    #[arg(long = "firmware")]
+    pub firmware: Option<PathBuf>,
+
+    /// Attach block disk image: <path> or <id>:<path>[:ro]
+    #[arg(long = "disk")]
+    pub disks: Vec<String>,
+
     /// Optional command to override ENTRYPOINT/CMD
     #[arg(last = true)]
     pub cmd: Vec<String>,
@@ -152,8 +172,73 @@ pub struct RunArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run an OCI container image as a microVM
+    /// Run an OCI container image, direct kernel, or firmware disk as a microVM
     Run(Box<RunArgs>),
+
+    /// Boot a unikernel image (Unikraft, Nanos, OSv, Solo5) directly in a microVM
+    Unikernel {
+        /// Path to the unikernel binary (ELF)
+        kernel: PathBuf,
+
+        /// Number of virtual CPUs
+        #[arg(short = 'c', long, default_value_t = 1)]
+        cpus: u8,
+
+        /// RAM in MiB
+        #[arg(short = 'm', long, default_value_t = 512)]
+        memory: u32,
+
+        /// Unikernel command line arguments
+        #[arg(long = "cmdline", alias = "params")]
+        cmdline: Option<String>,
+
+        /// Attach block disk image: <path> or <id>:<path>[:ro]
+        #[arg(long = "disk")]
+        disks: Vec<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Run an AI coding agent or secure developer workspace in an isolated microVM sandbox
+    Sandbox {
+        /// Agent or profile to launch (e.g. claude, gemini, codex, dev)
+        #[arg(default_value = "dev")]
+        agent: String,
+
+        /// Host directory to mount as isolated Copy-on-Write (CoW) workspace
+        #[arg(short = 'w', long = "workspace", default_value = ".")]
+        workspace: PathBuf,
+
+        /// Git repository URL to clone into workspace on boot
+        #[arg(long = "repo")]
+        repo: Option<String>,
+
+        /// Container base image
+        #[arg(short = 'i', long = "image", default_value = "alpine:latest")]
+        image: String,
+
+        /// Number of virtual CPUs
+        #[arg(short = 'c', long, default_value_t = 2)]
+        cpus: u8,
+
+        /// RAM in MiB
+        #[arg(short = 'm', long, default_value_t = 1024)]
+        memory: u32,
+
+        /// Secrets to inject into guest (KEY=VAL, KEY (reads from host env), or @/path/to/file)
+        #[arg(long = "secret", value_name = "KEY=VAL|KEY|@FILE")]
+        secrets: Vec<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Optional command to execute inside the sandbox
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
 
     /// Execute a command inside a running microVM
     Exec {
@@ -469,6 +554,11 @@ async fn main() -> Result<()> {
                 allow_hosts,
                 secrets,
                 max_tokens,
+                kernel,
+                initrd,
+                cmdline,
+                firmware,
+                disks,
                 cmd,
             } = *run;
             let mut builder = if let Some(ref b) = bundle {
@@ -476,14 +566,29 @@ async fn main() -> Result<()> {
                     println!("📦 Loading MicroVM from OCI bundle: {}", b.display());
                 }
                 MicroVmBuilder::from_bundle(b)?
+            } else if let Some(ref kpath) = kernel {
+                if !detach {
+                    println!("🚀 Direct kernel boot: {}", kpath.display());
+                }
+                MicroVmBuilder::new("").kernel(kpath.clone(), initrd, cmdline)
+            } else if let Some(ref fpath) = firmware {
+                if !detach {
+                    println!("🚀 UEFI firmware boot: {}", fpath.display());
+                }
+                MicroVmBuilder::new("").firmware(fpath.clone())
             } else if !image.is_empty() {
                 if !detach {
                     println!("🚀 Launching MicroVM for image '{}'...", image);
                 }
                 MicroVmBuilder::new(image)
             } else {
-                bail!("Please specify an image reference (e.g. 'alpine:latest') or an OCI bundle path with '--bundle <path>'");
+                bail!("Please specify an image reference (e.g. 'alpine:latest'), '--kernel <path>', '--firmware <path>', or '--bundle <path>'");
             };
+
+            for (i, d) in disks.iter().enumerate() {
+                let (id, path, ro) = parse_disk_arg(d, i);
+                builder = builder.disk(id, path, ro);
+            }
 
             builder = builder
                 .cpus(cpus)
@@ -661,6 +766,138 @@ async fn main() -> Result<()> {
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
+        }
+
+        Commands::Unikernel {
+            kernel,
+            cpus,
+            memory,
+            cmdline,
+            disks,
+            data_dir,
+        } => {
+            let mut builder = MicroVmBuilder::new("")
+                .cpus(cpus)
+                .memory_mb(memory)
+                .unikernel(kernel, cmdline)
+                .interactive(true)
+                .tty(true);
+
+            if let Some(dd) = data_dir {
+                builder = builder.data_dir(dd);
+            }
+
+            for (i, d) in disks.iter().enumerate() {
+                let (id, path, ro) = parse_disk_arg(d, i);
+                builder = builder.disk(id, path, ro);
+            }
+
+            println!(
+                "🚀 Launching unikernel in microVM ({} vCPUs, {} MiB RAM)...",
+                cpus, memory
+            );
+            let mut vm = builder.run().await.context("Failed to boot unikernel")?;
+            let status = vm.wait().await?;
+            println!("🛑 Unikernel exited with status: {}", status);
+            std::process::exit(status.code().unwrap_or(0));
+        }
+
+        Commands::Sandbox {
+            agent,
+            workspace,
+            repo,
+            image,
+            cpus,
+            memory,
+            secrets,
+            data_dir,
+            cmd,
+        } => {
+            let abs_ws = std::fs::canonicalize(&workspace).unwrap_or(workspace);
+            println!(
+                "🛡️  Initializing microVM Sandbox for AI Agent '{}'...",
+                agent
+            );
+            println!("📁 Isolated Workspace: {}", abs_ws.display());
+
+            let mut builder = MicroVmBuilder::new(&image)
+                .cpus(cpus)
+                .memory_mb(memory)
+                .interactive(true)
+                .tty(true)
+                .workspace_cow(&abs_ws, "workspace")
+                .workdir("/workspace");
+
+            if let Some(dd) = data_dir {
+                builder = builder.data_dir(dd);
+            }
+
+            // Inject any explicit secrets passed via --secret
+            for s in &secrets {
+                let (k, v) = parse_secret_arg(s)?;
+                builder = builder.secret(k, v);
+            }
+
+            // Configure AI Agent specific egress rules and environment
+            match agent.to_lowercase().as_str() {
+                "claude" => {
+                    builder = builder
+                        .allow_host("api.anthropic.com:443")
+                        .allow_host("cdn.anthropic.com:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443")
+                        .allow_host("registry.npmjs.org:443");
+                    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+                        builder = builder.secret("ANTHROPIC_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("ANTHROPIC_API_KEY")) {
+                        eprintln!("⚠️  ANTHROPIC_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
+                "gemini" => {
+                    builder = builder
+                        .allow_host("generativelanguage.googleapis.com:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+                        builder = builder.secret("GEMINI_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("GEMINI_API_KEY")) {
+                        eprintln!("⚠️  GEMINI_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
+                "codex" | "openai" => {
+                    builder = builder
+                        .allow_host("api.openai.com:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+                        builder = builder.secret("OPENAI_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("OPENAI_API_KEY")) {
+                        eprintln!("⚠️  OPENAI_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
+                _ => {
+                    builder = builder
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                }
+            }
+
+            if let Some(git_repo) = repo {
+                let clone_script = format!(
+                    "if [ ! -d .git ]; then git clone {} .; fi; exec /bin/sh",
+                    git_repo
+                );
+                builder = builder.cmd(vec!["/bin/sh".to_string(), "-c".to_string(), clone_script]);
+            } else if !cmd.is_empty() {
+                builder = builder.cmd(cmd);
+            } else {
+                builder = builder.cmd(vec!["/bin/sh".to_string()]);
+            }
+
+            let mut vm = builder.run().await.context("Failed to start sandbox")?;
+            let status = vm.wait().await?;
+            println!("🛑 Sandbox session closed with status: {}", status);
+            std::process::exit(status.code().unwrap_or(0));
         }
 
         Commands::Ps {
@@ -1567,6 +1804,36 @@ fn host_memory_bytes() -> Option<u64> {
     }
 }
 
+/// Parses a `--disk` CLI argument into (id, path, read_only).
+///
+/// Accepted formats:
+///   `/path/to/disk.raw`                  → auto-ID, rw
+///   `/path/to/disk.raw:ro`               → auto-ID, ro
+///   `myid:/path/to/disk.raw`             → explicit ID, rw
+///   `myid:/path/to/disk.raw:ro`          → explicit ID, ro
+///
+/// `disk_index` is used to generate unique auto-IDs (`disk0`, `disk1`, ...).
+fn parse_disk_arg(arg: &str, disk_index: usize) -> (String, PathBuf, bool) {
+    let parts: Vec<&str> = arg.split(':').collect();
+    match parts.len() {
+        1 => (format!("disk{disk_index}"), PathBuf::from(parts[0]), false),
+        2 => {
+            if parts[1] == "ro" {
+                (format!("disk{disk_index}"), PathBuf::from(parts[0]), true)
+            } else if parts[1] == "rw" {
+                (format!("disk{disk_index}"), PathBuf::from(parts[0]), false)
+            } else {
+                (parts[0].to_string(), PathBuf::from(parts[1]), false)
+            }
+        }
+        _ => (
+            parts[0].to_string(),
+            PathBuf::from(parts[1]),
+            parts[2] == "ro",
+        ),
+    }
+}
+
 fn parse_secret_arg(arg: &str) -> Result<(String, String)> {
     let (key, value_spec) = arg.split_once('=').ok_or_else(|| {
         anyhow::anyhow!(
@@ -1989,6 +2256,127 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("Expected Commands::Metrics"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_multi_boot_run() {
+        let args = vec![
+            "microvm",
+            "run",
+            "--kernel",
+            "/boot/vmlinuz",
+            "--initrd",
+            "/boot/initrd.img",
+            "--cmdline",
+            "console=ttyS0 root=/dev/vda",
+            "--disk",
+            "rootfs.raw",
+            "--disk",
+            "data:data.raw:ro",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Run(run) => {
+                assert_eq!(run.kernel, Some(PathBuf::from("/boot/vmlinuz")));
+                assert_eq!(run.initrd, Some(PathBuf::from("/boot/initrd.img")));
+                assert_eq!(run.cmdline, Some("console=ttyS0 root=/dev/vda".to_string()));
+                assert_eq!(
+                    run.disks,
+                    vec!["rootfs.raw".to_string(), "data:data.raw:ro".to_string()]
+                );
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_unikernel_and_sandbox() {
+        let unikernel_args = vec![
+            "microvm",
+            "unikernel",
+            "app.unikraft",
+            "-c",
+            "1",
+            "-m",
+            "256",
+            "--cmdline",
+            "netdev.ipv4_addr=192.168.1.2",
+            "--disk",
+            "data.img",
+        ];
+        let cli = Cli::try_parse_from(unikernel_args).unwrap();
+        match cli.command {
+            Commands::Unikernel {
+                kernel,
+                cpus,
+                memory,
+                cmdline,
+                disks,
+                ..
+            } => {
+                assert_eq!(kernel, PathBuf::from("app.unikraft"));
+                assert_eq!(cpus, 1);
+                assert_eq!(memory, 256);
+                assert_eq!(cmdline, Some("netdev.ipv4_addr=192.168.1.2".to_string()));
+                assert_eq!(disks, vec!["data.img".to_string()]);
+            }
+            _ => panic!("Expected Commands::Unikernel"),
+        }
+
+        // Test with --params alias
+        let unikernel_params_args = vec![
+            "microvm",
+            "unikernel",
+            "app.unikraft",
+            "--params",
+            "console=ttyS0",
+        ];
+        let cli_unik = Cli::try_parse_from(unikernel_params_args).unwrap();
+        match cli_unik.command {
+            Commands::Unikernel { cmdline, .. } => {
+                assert_eq!(cmdline, Some("console=ttyS0".to_string()));
+            }
+            _ => panic!("Expected Commands::Unikernel"),
+        }
+
+        let sandbox_args = vec![
+            "microvm",
+            "sandbox",
+            "claude",
+            "--workspace",
+            ".",
+            "-c",
+            "4",
+            "-m",
+            "2048",
+            "--secret",
+            "CUSTOM_KEY=secretval",
+            "--repo",
+            "https://github.com/example/project.git",
+        ];
+        let cli2 = Cli::try_parse_from(sandbox_args).unwrap();
+        match cli2.command {
+            Commands::Sandbox {
+                agent,
+                workspace,
+                repo,
+                cpus,
+                memory,
+                secrets,
+                ..
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(workspace, PathBuf::from("."));
+                assert_eq!(
+                    repo,
+                    Some("https://github.com/example/project.git".to_string())
+                );
+                assert_eq!(cpus, 4);
+                assert_eq!(memory, 2048);
+                assert_eq!(secrets, vec!["CUSTOM_KEY=secretval".to_string()]);
+            }
+            _ => panic!("Expected Commands::Sandbox"),
         }
     }
 }

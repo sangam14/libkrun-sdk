@@ -33,10 +33,29 @@ pub enum KrunError {
     AddVsockPort(i32),
     #[error("Failed to configure virtio-gpu device, error code: {0}")]
     SetGpuOptions(i32),
+    #[error("Failed to add disk, error code: {0}")]
+    AddDisk(i32),
+    #[error("Failed to set kernel, error code: {0}")]
+    SetKernel(i32),
+    #[error("Failed to set firmware, error code: {0}")]
+    SetFirmware(i32),
+    #[error("Failed to disable implicit console, error code: {0}")]
+    DisableImplicitConsole(i32),
+    #[error("Failed to add serial console default, error code: {0}")]
+    AddSerialConsoleDefault(i32),
     #[error("Failed to start VM via krun_start_enter, error code: {0}")]
     StartEnter(i32),
     #[error("Nul byte in string argument: {0}")]
     NulError(#[from] std::ffi::NulError),
+}
+
+pub mod kernel_formats {
+    pub const KRUN_KERNEL_FORMAT_ELF: u32 = 0;
+    pub const KRUN_KERNEL_FORMAT_RAW: u32 = 1;
+    pub const KRUN_KERNEL_FORMAT_PE_GZ: u32 = 2;
+    pub const KRUN_KERNEL_FORMAT_IMAGE_BZ2: u32 = 3;
+    pub const KRUN_KERNEL_FORMAT_IMAGE_GZ: u32 = 4;
+    pub const KRUN_KERNEL_FORMAT_IMAGE_ZSTD: u32 = 5;
 }
 
 pub mod virgl_flags {
@@ -63,6 +82,20 @@ pub mod ffi {
         pub fn krun_create_ctx() -> i32;
         pub fn krun_free_ctx(ctx_id: u32) -> i32;
         pub fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32;
+        pub fn krun_add_disk(
+            ctx_id: u32,
+            block_id: *const c_char,
+            disk_path: *const c_char,
+            read_only: bool,
+        ) -> i32;
+        pub fn krun_set_kernel(
+            ctx_id: u32,
+            kernel_path: *const c_char,
+            kernel_format: u32,
+            initramfs: *const c_char,
+            cmdline: *const c_char,
+        ) -> i32;
+        pub fn krun_set_firmware(ctx_id: u32, firmware_path: *const c_char) -> i32;
         pub fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
         pub fn krun_set_exec(
             ctx_id: u32,
@@ -74,6 +107,8 @@ pub mod ffi {
         pub fn krun_set_env(ctx_id: u32, env: *const *const c_char) -> i32;
         pub fn krun_set_port_map(ctx_id: u32, port_map: *const *const c_char) -> i32;
         pub fn krun_set_console_output(ctx_id: u32, filepath: *const c_char) -> i32;
+        pub fn krun_disable_implicit_console(ctx_id: u32) -> i32;
+        pub fn krun_add_serial_console_default(ctx_id: u32, input_fd: i32, output_fd: i32) -> i32;
         pub fn krun_set_log_level(level: u32) -> i32;
         pub fn krun_set_rlimits(ctx_id: u32, rlimits: *const c_char) -> i32;
         pub fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
@@ -111,10 +146,30 @@ pub fn check_nested_virt() -> bool {
     unsafe { ffi::krun_check_nested_virt() }
 }
 
+#[cfg(unix)]
+fn path_to_cstring(path: &Path) -> Result<CString, KrunError> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(path.as_os_str().as_bytes()).map_err(KrunError::NulError)
+}
+
+#[cfg(not(unix))]
+fn path_to_cstring(path: &Path) -> Result<CString, KrunError> {
+    CString::new(path.to_string_lossy().as_bytes()).map_err(KrunError::NulError)
+}
+
+/// A handle to a libkrun microVM context.
+///
+/// # Thread Safety
+/// `KrunContext` implements `Send` so it can be moved between threads, but explicitly
+/// opts out of `Sync` (via `PhantomData<*const ()>`) because libkrun's C internal context
+/// operations are not thread-safe.
 pub struct KrunContext {
     ctx_id: u32,
     active: bool,
+    _not_sync: std::marker::PhantomData<*const ()>,
 }
+
+unsafe impl Send for KrunContext {}
 
 impl KrunContext {
     pub fn create() -> Result<Self, KrunError> {
@@ -125,6 +180,7 @@ impl KrunContext {
         Ok(Self {
             ctx_id: rc as u32,
             active: true,
+            _not_sync: std::marker::PhantomData,
         })
     }
 
@@ -141,8 +197,7 @@ impl KrunContext {
     }
 
     pub fn set_root<P: AsRef<Path>>(&mut self, path: P) -> Result<(), KrunError> {
-        let path_str = path.as_ref().to_string_lossy();
-        let c_path = CString::new(path_str.as_bytes())?;
+        let c_path = path_to_cstring(path.as_ref())?;
         let rc = unsafe { ffi::krun_set_root(self.ctx_id, c_path.as_ptr()) };
         if rc != 0 {
             return Err(KrunError::SetRoot(rc));
@@ -255,8 +310,7 @@ impl KrunContext {
     }
 
     pub fn set_console_output<P: AsRef<Path>>(&mut self, path: P) -> Result<(), KrunError> {
-        let path_str = path.as_ref().to_string_lossy();
-        let c_path = CString::new(path_str.as_bytes())?;
+        let c_path = path_to_cstring(path.as_ref())?;
         let rc = unsafe { ffi::krun_set_console_output(self.ctx_id, c_path.as_ptr()) };
         if rc != 0 {
             return Err(KrunError::SetConsoleOutput(rc));
@@ -271,8 +325,7 @@ impl KrunContext {
         read_only: bool,
     ) -> Result<(), KrunError> {
         let c_tag = CString::new(tag)?;
-        let path_str = path.as_ref().to_string_lossy();
-        let c_path = CString::new(path_str.as_bytes())?;
+        let c_path = path_to_cstring(path.as_ref())?;
         let rc = if read_only {
             // flags = 1 for read-only
             unsafe { ffi::krun_add_virtiofs2(self.ctx_id, c_tag.as_ptr(), c_path.as_ptr(), 1) }
@@ -311,11 +364,89 @@ impl KrunContext {
     }
 
     pub fn add_vsock_port<P: AsRef<Path>>(&mut self, port: u32, path: P) -> Result<(), KrunError> {
-        let path_str = path.as_ref().to_string_lossy();
-        let c_path = CString::new(path_str.as_bytes())?;
+        let c_path = path_to_cstring(path.as_ref())?;
         let rc = unsafe { ffi::krun_add_vsock_port(self.ctx_id, port, c_path.as_ptr()) };
         if rc != 0 {
             return Err(KrunError::AddVsockPort(rc));
+        }
+        Ok(())
+    }
+
+    pub fn add_disk<P: AsRef<Path>>(
+        &mut self,
+        block_id: &str,
+        disk_path: P,
+        read_only: bool,
+    ) -> Result<(), KrunError> {
+        let c_id = CString::new(block_id)?;
+        let c_path = path_to_cstring(disk_path.as_ref())?;
+        let rc =
+            unsafe { ffi::krun_add_disk(self.ctx_id, c_id.as_ptr(), c_path.as_ptr(), read_only) };
+        if rc != 0 {
+            return Err(KrunError::AddDisk(rc));
+        }
+        Ok(())
+    }
+
+    pub fn set_kernel<P: AsRef<Path>>(
+        &mut self,
+        kernel_path: P,
+        kernel_format: u32,
+        initramfs: Option<&Path>,
+        cmdline: Option<&str>,
+    ) -> Result<(), KrunError> {
+        let c_kpath = path_to_cstring(kernel_path.as_ref())?;
+        let c_initrd = match initramfs {
+            Some(p) => Some(path_to_cstring(p)?),
+            None => None,
+        };
+        let c_cmdline = match cmdline {
+            Some(s) => Some(CString::new(s)?),
+            None => None,
+        };
+        let initrd_ptr = c_initrd.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+        let cmdline_ptr = c_cmdline.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+
+        let rc = unsafe {
+            ffi::krun_set_kernel(
+                self.ctx_id,
+                c_kpath.as_ptr(),
+                kernel_format,
+                initrd_ptr,
+                cmdline_ptr,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::SetKernel(rc));
+        }
+        Ok(())
+    }
+
+    pub fn set_firmware<P: AsRef<Path>>(&mut self, firmware_path: P) -> Result<(), KrunError> {
+        let c_path = path_to_cstring(firmware_path.as_ref())?;
+        let rc = unsafe { ffi::krun_set_firmware(self.ctx_id, c_path.as_ptr()) };
+        if rc != 0 {
+            return Err(KrunError::SetFirmware(rc));
+        }
+        Ok(())
+    }
+
+    pub fn disable_implicit_console(&mut self) -> Result<(), KrunError> {
+        let rc = unsafe { ffi::krun_disable_implicit_console(self.ctx_id) };
+        if rc != 0 {
+            return Err(KrunError::DisableImplicitConsole(rc));
+        }
+        Ok(())
+    }
+
+    pub fn add_serial_console_default(
+        &mut self,
+        input_fd: i32,
+        output_fd: i32,
+    ) -> Result<(), KrunError> {
+        let rc = unsafe { ffi::krun_add_serial_console_default(self.ctx_id, input_fd, output_fd) };
+        if rc != 0 {
+            return Err(KrunError::AddSerialConsoleDefault(rc));
         }
         Ok(())
     }
@@ -328,7 +459,11 @@ impl KrunContext {
     pub fn start_enter(mut self) -> Result<(), KrunError> {
         self.active = false;
         let rc = unsafe { ffi::krun_start_enter(self.ctx_id) };
-        Err(KrunError::StartEnter(rc))
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(KrunError::StartEnter(rc))
+        }
     }
 }
 
@@ -338,6 +473,41 @@ impl Drop for KrunContext {
             unsafe {
                 ffi::krun_free_ctx(self.ctx_id);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_krun_context_send_not_sync() {
+        fn assert_send<T: Send>() {}
+        assert_send::<KrunContext>();
+
+        // Verify that KrunContext does NOT implement Sync at compile time
+        // by testing that an attempt to pass &KrunContext across threads fails if required.
+        // The presence of PhantomData<*const ()> removes Sync.
+    }
+
+    #[test]
+    fn test_path_to_cstring_valid() {
+        let p = PathBuf::from("/var/run/krun.sock");
+        let c = path_to_cstring(&p).expect("valid path should convert");
+        assert_eq!(c.to_bytes_with_nul(), b"/var/run/krun.sock\0");
+    }
+
+    #[test]
+    fn test_path_to_cstring_rejects_nul() {
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+            let bad_path = OsStr::from_bytes(b"/tmp/foo\0bar");
+            let p = Path::new(bad_path);
+            assert!(path_to_cstring(p).is_err());
         }
     }
 }

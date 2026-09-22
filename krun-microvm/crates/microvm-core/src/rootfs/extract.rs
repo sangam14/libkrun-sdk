@@ -1,4 +1,4 @@
-use super::tar_security::{ensure_no_symlink_parents, sanitize_tar_path};
+use super::tar_security::{ensure_no_symlink_parents, sanitize_tar_path, validate_symlink_target};
 use super::whiteout::{apply_whiteout, is_whiteout};
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -15,19 +15,21 @@ pub fn extract_layer<R: Read>(reader: R, root_dir: &Path, is_gzipped: bool) -> R
     fs::create_dir_all(root_dir)
         .with_context(|| format!("Failed to create rootfs dir: {}", root_dir.display()))?;
 
-    let limited_reader = reader.take(MAX_EXTRACTION_BYTES);
-
+    // Apply the extraction limit to the UNCOMPRESSED stream to protect against zip bombs
     if is_gzipped {
-        let gz = GzDecoder::new(limited_reader);
-        extract_tar_archive(gz, root_dir)
+        let gz = GzDecoder::new(reader);
+        let limited_uncompressed = gz.take(MAX_EXTRACTION_BYTES);
+        extract_tar_archive(limited_uncompressed, root_dir)
     } else {
-        extract_tar_archive(limited_reader, root_dir)
+        let limited_uncompressed = reader.take(MAX_EXTRACTION_BYTES);
+        extract_tar_archive(limited_uncompressed, root_dir)
     }
 }
 
 /// Extracts an uncompressed tar archive into root_dir applying whiteout and security validations.
 fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
     let mut archive = Archive::new(reader);
+    let mut total_extracted: u64 = 0;
 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
@@ -65,7 +67,13 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
                 }
                 let mut out_file = File::create(&target_path)
                     .with_context(|| format!("Failed to create file {}", target_path.display()))?;
-                std::io::copy(&mut entry, &mut out_file)?;
+                let copied = std::io::copy(&mut entry, &mut out_file)?;
+                total_extracted += copied;
+                if total_extracted > MAX_EXTRACTION_BYTES {
+                    anyhow::bail!(
+                        "Layer uncompressed extraction size exceeded maximum limit of {MAX_EXTRACTION_BYTES} bytes"
+                    );
+                }
 
                 #[cfg(unix)]
                 {
@@ -82,6 +90,7 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
                     let _ = fs::remove_file(&target_path);
                 }
                 if let Some(link_target) = entry.link_name()? {
+                    validate_symlink_target(root_dir, &target_path, &link_target)?;
                     #[cfg(unix)]
                     std::os::unix::fs::symlink(link_target, &target_path)?;
                 }

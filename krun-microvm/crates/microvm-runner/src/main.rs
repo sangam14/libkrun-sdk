@@ -4,13 +4,69 @@ use microvm_core::types::RunnerConfig;
 use std::process::ExitCode;
 
 mod sandbox;
+mod supervisor;
+mod watchdog;
+
+/// Returns a file descriptor safe for use with kqueue/epoll as the console input.
+///
+/// When stdin is not a TTY (daemon mode, redirected input, /dev/null), libkrun's
+/// event loop will abort with an assertion failure on non-pollable descriptors.
+/// We substitute the read-end of an internal pipe that stays open and pollable.
+///
+/// Uses `O_CLOEXEC` to prevent FD leaks across fork/exec boundaries, and
+/// explicitly closes the write-end since nothing will write to it.
+fn safe_console_input_fd() -> Result<i32> {
+    if unsafe { libc::isatty(0) } == 1 {
+        return Ok(0);
+    }
+
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        bail!(
+            "Failed to create non-pollable stdin fallback pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    // Set CLOEXEC on the read-end to prevent leaking into forked child processes.
+    unsafe { libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC) };
+
+    // Close the write-end immediately — we only need the read-end to stay
+    // open and pollable. The read-end will EOF if this process exits, which
+    // is the correct behavior for a dummy console input.
+    unsafe { libc::close(fds[1]) };
+
+    Ok(fds[0])
+}
 
 fn validate_config(cfg: &RunnerConfig) -> Result<()> {
-    if !cfg.root_path.exists() {
-        bail!("Root path does not exist: {}", cfg.root_path.display());
-    }
-    if !cfg.root_path.is_dir() {
-        bail!("Root path is not a directory: {}", cfg.root_path.display());
+    match cfg.boot_payload.as_ref() {
+        Some(microvm_core::types::BootPayload::Kernel(k)) => {
+            if !k.kernel_path.exists() {
+                bail!("Kernel path does not exist: {}", k.kernel_path.display());
+            }
+        }
+        Some(microvm_core::types::BootPayload::Firmware(f)) => {
+            if !f.firmware_path.exists() {
+                bail!(
+                    "Firmware path does not exist: {}",
+                    f.firmware_path.display()
+                );
+            }
+        }
+        Some(microvm_core::types::BootPayload::Unikernel(u)) => {
+            if !u.kernel_path.exists() {
+                bail!("Unikernel path does not exist: {}", u.kernel_path.display());
+            }
+        }
+        Some(microvm_core::types::BootPayload::Oci) | None => {
+            if !cfg.root_path.exists() {
+                bail!("Root path does not exist: {}", cfg.root_path.display());
+            }
+            if !cfg.root_path.is_dir() {
+                bail!("Root path is not a directory: {}", cfg.root_path.display());
+            }
+        }
     }
     if cfg.num_vcpus == 0 {
         bail!("num_vcpus must be > 0");
@@ -23,11 +79,21 @@ fn validate_config(cfg: &RunnerConfig) -> Result<()> {
             bail!("VirtioFS host path does not exist: {}", m.path.display());
         }
     }
+    for d in &cfg.disks {
+        if !d.path.exists() {
+            bail!("Block disk path does not exist: {}", d.path.display());
+        }
+    }
     Ok(())
 }
 
 fn run_vm(cfg: RunnerConfig) -> Result<()> {
     validate_config(&cfg)?;
+
+    let supervisor = match cfg.supervisor_sock_path.as_ref() {
+        Some(p) => Some(supervisor::SupervisorServer::start(p)?),
+        None => None,
+    };
 
     if let Some(level) = cfg.log_level {
         let _ = krun_sys::set_log_level(level);
@@ -38,8 +104,43 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
     ctx.set_vm_config(cfg.num_vcpus, cfg.ram_mib)
         .context("Failed to set VM resources")?;
 
-    ctx.set_root(&cfg.root_path)
-        .context("Failed to set VM rootfs")?;
+    // Attach any configured block disk devices
+    for disk in &cfg.disks {
+        ctx.add_disk(&disk.id, &disk.path, disk.read_only)
+            .with_context(|| format!("Failed to add block disk '{}'", disk.id))?;
+    }
+
+    // Configure boot payload: OCI Rootfs, Direct Kernel, UEFI Firmware, or Unikernel
+    match cfg.boot_payload.as_ref() {
+        Some(microvm_core::types::BootPayload::Kernel(k)) => {
+            let cmdline = k.cmdline.as_deref().unwrap_or("console=ttyS0");
+            ctx.set_kernel(
+                &k.kernel_path,
+                k.kernel_format,
+                k.initramfs.as_deref(),
+                Some(cmdline),
+            )
+            .context("Failed to configure direct kernel payload")?;
+        }
+        Some(microvm_core::types::BootPayload::Firmware(f)) => {
+            ctx.set_firmware(&f.firmware_path)
+                .context("Failed to configure UEFI firmware payload")?;
+        }
+        Some(microvm_core::types::BootPayload::Unikernel(u)) => {
+            let cmdline = u.cmdline.as_deref();
+            ctx.set_kernel(
+                &u.kernel_path,
+                krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF,
+                None,
+                cmdline,
+            )
+            .context("Failed to configure unikernel payload")?;
+        }
+        Some(microvm_core::types::BootPayload::Oci) | None => {
+            ctx.set_root(&cfg.root_path)
+                .context("Failed to set VM rootfs")?;
+        }
+    }
 
     // Configure optional resource limits (rlimits)
     if let Some(ref rlimits) = cfg.rlimits {
@@ -51,7 +152,8 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
     if cfg.no_network {
         // Air-gapped isolation: instruct libkrun to expose zero ports and disable network
         let empty_map: Vec<String> = Vec::new();
-        let _ = ctx.set_port_map(&empty_map);
+        ctx.set_port_map(&empty_map)
+            .context("Failed to configure air-gapped port map")?;
     } else if let Some(ref sock_path) = cfg.net_sock_path {
         ctx.add_net_unixstream(Some(sock_path), None)
             .context("Failed to add virtio-net unixstream")?;
@@ -119,14 +221,35 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             .with_context(|| format!("Failed to add vsock port {}", vp.port))?;
     }
 
+    // Configure serial console and ensure pollable input descriptor to prevent kqueue/epoll aborts
+    let in_fd = safe_console_input_fd()?;
+    let _ = ctx.disable_implicit_console();
+    ctx.add_serial_console_default(in_fd, 1)
+        .context("Failed to configure default serial console")?;
+
+    // Install watchdog for hypervisor resilience (macOS SMP PSCI CPU_OFF panic)
+    #[cfg(target_os = "macos")]
+    watchdog::install();
+
     // 7. Enforce zero-trust host sandboxing before entering hypervisor
     sandbox::apply_sandbox(&cfg)?;
 
     // Launch the VM.
-    // WARNING: This never returns on success. The calling process becomes the VM supervisor.
-    ctx.start_enter().context("libkrun VM startup failed")?;
+    // The calling process becomes the VM supervisor until the guest halts.
+    if let Some(ref s) = supervisor {
+        s.emit_booted();
+    }
 
-    bail!("krun_start_enter returned unexpectedly");
+    let res = ctx.start_enter().context("libkrun VM execution failed");
+    if let Some(ref s) = supervisor {
+        match &res {
+            Ok(()) => s.emit_exited(0, "clean guest exit"),
+            Err(e) => s.emit_failed(&format!("{e:#}"), "execution"),
+        }
+    }
+    res?;
+
+    Ok(())
 }
 
 fn main() -> ExitCode {

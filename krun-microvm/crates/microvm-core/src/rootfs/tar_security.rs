@@ -71,6 +71,32 @@ pub fn ensure_no_symlink_parents(root_dir: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Validates that a symlink target, if relative, does not traverse above the `root_dir`.
+pub fn validate_symlink_target(root_dir: &Path, symlink_path: &Path, target: &Path) -> Result<()> {
+    if target.is_relative() {
+        let parent = symlink_path.parent().unwrap_or(root_dir);
+        let mut current = parent.to_path_buf();
+        for comp in target.components() {
+            match comp {
+                Component::Normal(c) => current.push(c),
+                Component::ParentDir => {
+                    if current == root_dir || !current.starts_with(root_dir) {
+                        bail!(
+                            "Security violation: symlink target {:?} from {:?} escapes container root {:?}",
+                            target,
+                            symlink_path,
+                            root_dir
+                        );
+                    }
+                    current.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +120,54 @@ mod tests {
         let root = Path::new("/tmp/rootfs");
         let result = sanitize_tar_path(root, Path::new("../../../etc/shadow"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_symlink_target_safe() {
+        let root = Path::new("/tmp/rootfs");
+        let link = Path::new("/tmp/rootfs/bin/sh");
+        let target = Path::new("bash");
+        assert!(validate_symlink_target(root, link, target).is_ok());
+
+        let link_nested = Path::new("/tmp/rootfs/usr/bin/python3");
+        let target_nested = Path::new("../lib/python3.11/bin/python3");
+        assert!(validate_symlink_target(root, link_nested, target_nested).is_ok());
+    }
+
+    #[test]
+    fn test_validate_symlink_target_escaping() {
+        let root = Path::new("/tmp/rootfs");
+        let link = Path::new("/tmp/rootfs/bin/sh");
+        let target = Path::new("../../../../etc/shadow");
+        assert!(validate_symlink_target(root, link, target).is_err());
+
+        let link2 = Path::new("/tmp/rootfs/opt/tool");
+        let target2 = Path::new("../../outside");
+        assert!(validate_symlink_target(root, link2, target2).is_err());
+    }
+
+    #[test]
+    fn test_ensure_no_symlink_parents_with_real_fs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+
+        let real_dir = root.join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        let symlink_dir = root.join("sym_dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+        // Target path passing through symlink should be rejected
+        let dangerous_target = symlink_dir.join("evil_file");
+        #[cfg(unix)]
+        {
+            let res = ensure_no_symlink_parents(root, &dangerous_target);
+            assert!(res.is_err());
+        }
+
+        // Target path with no symlinks should be accepted
+        let safe_target = real_dir.join("safe_file");
+        assert!(ensure_no_symlink_parents(root, &safe_target).is_ok());
     }
 }

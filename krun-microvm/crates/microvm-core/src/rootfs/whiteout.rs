@@ -17,22 +17,35 @@ pub fn is_opaque_whiteout(file_name: &str) -> bool {
 /// If `.wh..wh..opq`: removes all contents inside the parent directory.
 /// If `.wh.<filename>`: removes `<filename>` inside the parent directory.
 pub fn apply_whiteout(root_dir: &Path, rel_path: &Path) -> Result<()> {
-    let file_name = match rel_path.file_name().and_then(|s| s.to_str()) {
-        Some(s) => s,
+    // Sanitize path to prevent Zip-Slip / traversal in whiteout marker paths
+    let safe_rel = crate::rootfs::tar_security::sanitize_tar_path(root_dir, rel_path)?;
+
+    let file_name = match safe_rel.file_name().and_then(|s| s.to_str()) {
+        Some(s) => s.to_string(),
         None => return Ok(()),
     };
 
-    let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
-    let parent_dir = root_dir.join(parent_rel);
+    let parent_dir = match safe_rel.parent() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
 
-    if !parent_dir.exists() {
+    if !parent_dir.starts_with(root_dir) || !parent_dir.exists() {
         return Ok(());
     }
 
-    if is_opaque_whiteout(file_name) {
+    // Verify parent is not a symlink to prevent writing through escaping paths
+    if parent_dir.is_symlink() {
+        anyhow::bail!(
+            "Security violation: parent directory of whiteout marker is a symlink: {:?}",
+            parent_dir
+        );
+    }
+
+    if is_opaque_whiteout(&file_name) {
         // Remove all entries in parent_dir
         if parent_dir.is_dir() {
-            for entry in fs::read_dir(&parent_dir)? {
+            for entry in fs::read_dir(parent_dir)? {
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_dir() {
@@ -97,5 +110,13 @@ mod tests {
         assert!(sub.exists());
         assert!(!f1.exists());
         assert!(!f2.exists());
+    }
+
+    #[test]
+    fn test_apply_whiteout_traversal_rejected() {
+        let dir = tempdir().unwrap();
+        let res = apply_whiteout(dir.path(), Path::new("../../../.wh.target"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("illegal '..'"));
     }
 }
