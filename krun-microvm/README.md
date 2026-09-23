@@ -16,6 +16,7 @@
 | **Memory Footprint** | 30 MB – 60 MB per instance runtime overhead | **< 5 MB razor-thin native binary** | Pack **10x more concurrent microVMs** on the same bare-metal host |
 | **Boot Latency** | 500ms – 2000ms | **Sub-100ms cold boot** | Instant serverless scaling, microsecond task provisioning |
 | **CoW Filesystem Cloning** | External tools or coarse `x/sys/unix` wrappers | Native kernel APFS `clonefile(2)` & Linux `FICLONE` ioctls | Instant snapshotting with zero duplicate disk consumption |
+| **Networking** | Root TAP bridge setup | Requires root privileges for TAP, Bridge, iptables | **Embedded CGO `gvproxy` (`libgvproxy-sys`) + Transparent Socket Impersonation (TSI)** | **100% Rootless user-space TCP/UDP networking**, dynamic port forwarding, egress allowlisting, & CNI bridge support |
 | **Safety & Concurrency** | Go M:N runtime scheduler conflicts with hypervisor threads | Deterministic OS thread isolation & async Tokio orchestration | True hardware CPU thread pinning; zero scheduler contention |
 | **Direct Access (DAX)** | None / manual external blocks | **Native VirtioFS DAX Window (`--dax <size>`)** | Zero-copy mmap of multi-GB LLM weights (GGUF/Safetensors) into guest physical address space |
 | **Image Acceleration** | Full layer tar download & decompression required (~minutes for multi-GB) | **Dragonfly Nydus RAFSv6 Lazy Loading (`--lazy-load`)** | Sub-50ms cold starts with metadata bootstrap; zero-copy on-demand chunk streaming over VirtioFS DAX |
@@ -27,7 +28,7 @@
 | **LLM Token Metering** | External API gateways | **Streaming Token Meter & Hard Budgets (`--max-tokens`)** | Enforces hard cumulative token ceilings directly at host proxy; returns 429 Too Many Requests on breach |
 | **Observability** | External stat collectors / cAdvisor | **Native Prometheus 0.0.4 Engine (`microvm metrics`)** | Single-shot and live HTTP scrape server (`--listen`) with per-VM CPU/memory/faults telemetry |
 | **Serverless SDK** | Complex custom Docker/CLI wrappers | **Pure Python SDK with `@task` Decorator** | Seamlessly dispatch Python functions to ephemeral, hardware-isolated microVMs with single decorator |
-| **Kubernetes Integration** | Monolithic external daemons or out-of-tree bridges | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `crictl stats` telemetry |
+| **Kubernetes Integration** | Monolithic external daemons or out-of-tree bridges | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with multi-port forwarding, CNI/gvproxy modes, egress allowlists, token budgeting, and live `crictl stats` telemetry |
 
 ---
 
@@ -81,17 +82,20 @@ libkrun-sdk/
     │   └── README.md        # Kubernetes deployment guide
     ├── crates/
     │   ├── krun-sys/        # Safe and FFI bindings to libkrun
+    │   ├── libgvproxy-sys/  # CGO wrapper around gvisor-tap-vsock for static rootless user-space networking
     │   ├── microvm-core/    # Core SDK: OCI client, rootfs CoW, whiteouts, telemetry, VM builder
     │   ├── microvm-runner/  # Isolated supervisor process that enters the VM
     │   ├── microvm-cli/     # User-facing CLI tool (`microvm`)
     │   ├── containerd-shim-krun/ # containerd v2 shim (`containerd-shim-krun-v2`)
     │   └── krun-operator/   # Pure-Rust Kubernetes Operator (kube-rs)
     ├── sdks/
-    │   └── python/          # Serverless Python SDK (libkrun_microvm)
-    │       ├── pyproject.toml
-    │       ├── README.md
-    │       ├── libkrun_microvm/ # @task decorator, client, error types
-    │       └── tests/       # Unit test suite for Python SDK
+    │   ├── python/          # Serverless Python SDK (libkrun_microvm)
+    │   │   ├── pyproject.toml
+    │   │   ├── README.md
+    │   │   ├── libkrun_microvm/ # @task decorator, client, error types
+    │   │   └── tests/       # Unit test suite for Python SDK
+    │   ├── typescript/      # Modern Node / TypeScript Client SDK (@libkrun/sdk)
+    │   └── go/              # Pure Go MicroVM Client SDK (krun-sdk-go)
     └── examples/
         ├── run_alpine.rs    # Quick-start SDK example
         ├── run_ai_sandbox.rs # AI Agent CoW sandboxing example
@@ -661,11 +665,16 @@ See runnable example in [`examples/python_sdk_agent.py`](examples/python_sdk_age
 
 ### Quick Setup
 
-1. **Install the Shim & Runner**:
+1. **Automated Setup with `microvm containerd` CLI**:
    ```bash
-   cargo build --release -p containerd-shim-krun -p microvm-runner
-   sudo install -m 755 target/release/containerd-shim-krun-v2 /usr/local/bin/
-   sudo install -m 755 target/release/microvm-runner /usr/local/bin/
+   # Install or symlink containerd-shim-krun-v2 to /usr/local/bin:
+   microvm containerd install
+
+   # Generate containerd config snippet:
+   microvm containerd generate-config
+
+   # Check installation and connectivity:
+   microvm containerd status
    ```
 
 2. **Register with containerd** (`/etc/containerd/config.toml`):
@@ -696,6 +705,46 @@ See runnable example in [`examples/python_sdk_agent.py`](examples/python_sdk_age
          image: alpine:latest
          command: ["/bin/sh", "-c", "echo Hardware-isolated microVM Pod! && sleep 3600"]
    ```
+
+### Declarative Management with `krun-operator` (`kube-rs`)
+
+For declarative Kubernetes management, `krun-operator` provides a native Kubernetes operator powered by `kube-rs` that translates `MicroVm` custom resources into hardware-isolated pods backed by `containerd-shim-krun-v2`:
+
+```bash
+# 1. Install the MicroVm CustomResourceDefinition
+kubectl apply -f k8s/crd-microvm.yaml
+
+# 2. Run the pure-Rust operator
+cargo run --release -p krun-operator
+
+# 3. Apply a declarative MicroVm CRD manifest
+kubectl apply -f k8s/example-microvm-crd.yaml
+```
+
+Sample Declarative Manifest (`MicroVm` `v1alpha1`):
+```yaml
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: mistral-7b-inference
+  namespace: default
+spec:
+  image: ghcr.io/ericlbuehler/mistral.rs:cpu-latest
+  vcpus: 4
+  memory: 8Gi
+  daxWindowSize: 4Gi
+  networkMode: cni
+  sandbox: true
+  ports:
+    - name: http
+      hostPort: 1234
+      containerPort: 1234
+      protocol: TCP
+  allowEgress:
+    - "huggingface.co:443"
+    - "cdn-lfs.huggingface.co:443"
+  tokenBudget: 100000
+```
 
 See the full guide in [k8s/README.md](k8s/README.md).
 

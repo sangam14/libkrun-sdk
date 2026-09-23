@@ -17,7 +17,7 @@
 | **Cold Boot Latency** | 500ms – 2000ms | ~250ms – 600ms | **Sub-100ms cold boot** | Instant serverless scaling, microsecond task provisioning |
 | **Guest Architecture** | Nested containers via guest `runc` | Heavy guest OS + Go agent daemon + `runc` | **Direct PID 1 Static Exec** (`init.krun` < 1MB) | **Zero in-guest agent bloat**; container execs directly as PID 1 |
 | **CoW Storage** | External tools or loop block devices | devmapper thin-pools or raw block images | Native kernel APFS `clonefile(2)` & Linux `FICLONE` + VirtioFS | Instant snapshotting with zero duplicate disk consumption |
-| **Networking** | Root TAP bridge setup | Requires root privileges for TAP, Bridge, iptables | **Transparent Socket Impersonation (TSI)** + Resilient DNS | **100% Rootless networking** out-of-the-box; zero host bridge hassles |
+| **Networking** | Root TAP bridge setup | Requires root privileges for TAP, Bridge, iptables | **Embedded CGO `gvproxy` (`libgvproxy-sys`) + Transparent Socket Impersonation (TSI)** | **100% Rootless user-space TCP/UDP networking**, dynamic port forwarding, egress allowlisting, & CNI bridge support |
 | **Platform Support** | Linux only | Linux KVM only (fails on Apple Silicon) | **Universal Silicon**: macOS Apple Silicon (`Hypervisor.framework`) AND Linux KVM (`/dev/kvm`) | Full developer parity across Mac laptops and production Linux nodes |
 | **Direct Access (DAX)** | None / manual external blocks | Complex devmapper attachments | **Native VirtioFS DAX Window (`--dax <size>`)** | Zero-copy mmap of multi-GB LLM weights (GGUF/Safetensors) into guest physical address space |
 | **Image Acceleration** | Full layer tar download & untar required (~minutes) | Full rootfs block download required | **Dragonfly Nydus RAFSv6 Lazy Loading (`--lazy-load`)** | Sub-50ms cold starts with metadata bootstrap; zero-copy on-demand chunk streaming over VirtioFS DAX |
@@ -32,7 +32,7 @@
 | **Hypervisor Resilience** | Prone to kqueue aborts & SMP crash | Linux KVM only | **Battle-Tested Resilience (HVF Panic Interceptor, Safe Console Pipe, Signal TTY Recovery)** | Traps Apple Silicon HVF multi-vCPU PSCI shutdown panics; prevents kqueue epoll assertion aborts on non-pollable stdin; async-signal-safe terminal restore |
 | **AI Agent Sandboxing** | Manual container configs | Manual VMs | **Automated Zero-Trust Agent Sandbox (`microvm sandbox <agent>`)** | One-command sandboxing for Claude, Gemini, and Codex with CoW host repository clones, API allowlisting, secret proxying, and token budgeting |
 | **Multi-Language SDKs** | Go only or raw CLI wrappers | Python/Go REST clients | **Multi-Language Client SDKs (Rust, Python, TypeScript, Go)** | Native crates, Python `@task` serverless decorator, TypeScript/Node `@libkrun/sdk`, and Go `krun-sdk-go` |
-| **Kubernetes CRI** | Monolithic external daemons | `firecracker-containerd` (Go) | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with live `Task::stats` telemetry |
+| **Kubernetes CRI** | Monolithic external daemons | `firecracker-containerd` (Go) | Native containerd v2 TTRPC shim + pure-Rust `kube-rs` Operator | Declarative `MicroVm` CRD (`krun.io/v1alpha1`) with multi-port forwarding, CNI/gvproxy modes, egress allowlists, token budgeting, and live `Task::stats` telemetry |
 
 ---
 
@@ -82,12 +82,14 @@ libkrun-sdk/
     │   ├── crd-microvm.yaml # MicroVm CustomResourceDefinition (v1alpha1)
     │   ├── runtimeclass.yaml# RuntimeClass: krun definition
     │   ├── example-pod.yaml # Example hardware-isolated Pod
+    │   ├── example-microvm-crd.yaml # Example declarative MicroVm CRD manifest
     │   ├── containerd-config.toml # CRI runtime configuration snippet
     │   ├── ARCHITECTURE.md  # 5-layer control-to-silicon architecture
     │   ├── FIRECRACKER_COMPARISON.md # Architectural superiority & benchmark dominance vs AWS Firecracker
     │   └── README.md        # Kubernetes deployment guide
     ├── crates/
     │   ├── krun-sys/        # Safe and FFI bindings to libkrun
+    │   ├── libgvproxy-sys/  # CGO wrapper around gvisor-tap-vsock for static rootless user-space networking
     │   ├── microvm-core/    # Core SDK: OCI client, rootfs CoW, whiteouts, telemetry, VM builder
     │   ├── microvm-runner/  # Isolated supervisor process that enters the VM
     │   ├── microvm-cli/     # User-facing CLI tool (`microvm`)
@@ -703,11 +705,16 @@ curl http://localhost:1234/v1/chat/completions \
 
 ### Quick Kubernetes Setup
 
-1. **Install the Shim & Runner**:
+1. **Automated Setup with `microvm containerd` CLI**:
    ```bash
-   cargo build --release --manifest-path krun-microvm/Cargo.toml -p containerd-shim-krun -p microvm-runner
-   sudo install -m 755 krun-microvm/target/release/containerd-shim-krun-v2 /usr/local/bin/
-   sudo install -m 755 krun-microvm/target/release/microvm-runner /usr/local/bin/
+   # Install or symlink containerd-shim-krun-v2 to /usr/local/bin:
+   microvm containerd install
+
+   # Generate containerd config snippet:
+   microvm containerd generate-config
+
+   # Check installation and connectivity:
+   microvm containerd status
    ```
 
 2. **Register with containerd** (`/etc/containerd/config.toml`):
@@ -738,6 +745,46 @@ curl http://localhost:1234/v1/chat/completions \
          image: alpine:latest
          command: ["/bin/sh", "-c", "echo Hardware-isolated microVM Pod! && sleep 3600"]
    ```
+
+### Declarative Management with `krun-operator` (`kube-rs`)
+
+For declarative Kubernetes management, `krun-operator` provides a native Kubernetes operator powered by `kube-rs` that translates `MicroVm` custom resources into hardware-isolated pods backed by `containerd-shim-krun-v2`:
+
+```bash
+# 1. Install the MicroVm CustomResourceDefinition
+kubectl apply -f krun-microvm/k8s/crd-microvm.yaml
+
+# 2. Run the pure-Rust operator
+cargo run --release -p krun-operator
+
+# 3. Apply a declarative MicroVm CRD manifest
+kubectl apply -f krun-microvm/k8s/example-microvm-crd.yaml
+```
+
+Sample Declarative Manifest (`MicroVm` `v1alpha1`):
+```yaml
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: mistral-7b-inference
+  namespace: default
+spec:
+  image: ghcr.io/ericlbuehler/mistral.rs:cpu-latest
+  vcpus: 4
+  memory: 8Gi
+  daxWindowSize: 4Gi
+  networkMode: cni
+  sandbox: true
+  ports:
+    - name: http
+      hostPort: 1234
+      containerPort: 1234
+      protocol: TCP
+  allowEgress:
+    - "huggingface.co:443"
+    - "cdn-lfs.huggingface.co:443"
+  tokenBudget: 100000
+```
 
 ---
 

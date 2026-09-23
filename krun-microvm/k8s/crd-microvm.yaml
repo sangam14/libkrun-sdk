@@ -34,8 +34,24 @@ spec:
           spec:
             description: Custom Resource Definition for running hardware-isolated microVMs via libkrun
             properties:
+              allowEgress:
+                description: Allowed outbound egress destinations for zero-trust egress control (e.g. ["api.openai.com:443", "*.github.com:443"])
+                items:
+                  type: string
+                nullable: true
+                type: array
               cmd:
                 description: Optional command arguments override
+                items:
+                  type: string
+                nullable: true
+                type: array
+              daxWindowSize:
+                description: VirtioFS DAX shared memory window size (e.g. "4Gi", "512Mi")
+                nullable: true
+                type: string
+              dnsServers:
+                description: Custom DNS nameservers for in-guest name resolution
                 items:
                   type: string
                 nullable: true
@@ -54,9 +70,44 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              gpu:
+                description: Enable hardware-accelerated virtio-gpu (Metal on Apple Silicon, DRM on Linux)
+                nullable: true
+                type: boolean
+              gpuShmSize:
+                description: Shared memory vRAM window size for virtio-gpu (e.g. "4Gi", "8Gi")
+                nullable: true
+                type: string
               image:
                 description: OCI container image to run as a microVM (e.g. alpine:latest, ghcr.io/ericlbuehler/mistral.rs:cpu-latest)
                 type: string
+              imageAcceleration:
+                description: Dragonfly Nydus RAFSv6 image acceleration and lazy loading configuration
+                nullable: true
+                properties:
+                  chunkCacheDir:
+                    description: Host directory for caching downloaded chunk blobs
+                    nullable: true
+                    type: string
+                  chunkSize:
+                    description: Chunk or macro-chunk size (e.g. "4Mi", "64Mi")
+                    nullable: true
+                    type: string
+                  format:
+                    description: 'Accelerated format: "rafsv6", "erofs", or "zran"'
+                    nullable: true
+                    type: string
+                  lazyLoad:
+                    description: Enable instant on-demand lazy loading of chunks
+                    nullable: true
+                    type: boolean
+                  prefetch:
+                    description: List of paths to prefetch ahead of execution
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                type: object
               memory:
                 default: 512Mi
                 description: Memory limit (e.g. "512Mi", "4Gi", "8Gi")
@@ -65,10 +116,72 @@ spec:
                 description: Optional decoupled OCI model artifact reference (e.g. ghcr.io/mistralai/mistral-7b:v0.3)
                 nullable: true
                 type: string
+              networkMode:
+                description: 'Network mode: "cni", "gvproxy", "tsi", or "none" (default: "cni" in Kubernetes, "gvproxy" for rootless)'
+                nullable: true
+                type: string
+              paused:
+                description: 'Declarative pause state: if true, pauses/freezes all microVM vCPUs'
+                nullable: true
+                type: boolean
+              podAnnotations:
+                additionalProperties:
+                  type: string
+                description: Optional custom annotations to propagate to the backing Pod
+                nullable: true
+                type: object
+              podLabels:
+                additionalProperties:
+                  type: string
+                description: Optional custom labels to propagate to the backing Pod
+                nullable: true
+                type: object
               port:
                 description: Container port to expose
                 format: uint16
                 maximum: 65535.0
+                minimum: 0.0
+                nullable: true
+                type: integer
+              ports:
+                description: Multi-port mappings exposed by the microVM
+                items:
+                  description: Port mapping definition for MicroVM
+                  properties:
+                    containerPort:
+                      description: Container port inside the microVM
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    hostPort:
+                      description: Host port (optional; containerPort will be used if omitted)
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    name:
+                      description: Optional name for this port
+                      nullable: true
+                      type: string
+                    protocol:
+                      default: TCP
+                      description: 'Protocol (default: "TCP")'
+                      nullable: true
+                      type: string
+                  required:
+                  - containerPort
+                  type: object
+                nullable: true
+                type: array
+              sandbox:
+                description: 'Host filesystem and capability sandboxing (default: true)'
+                nullable: true
+                type: boolean
+              tokenBudget:
+                description: Cumulative LLM token budget ceiling; blocks outbound LLM requests once breached
+                format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
@@ -79,52 +192,70 @@ spec:
                 maximum: 255.0
                 minimum: 0.0
                 type: integer
+              volumeMounts:
+                description: Host volume mounts to pass into the microVM
+                items:
+                  description: Volume mount definition for passing host storage into a microVM
+                  properties:
+                    hostPath:
+                      description: Source host directory path
+                      type: string
+                    mountPath:
+                      description: Destination mount path inside the microVM
+                      type: string
+                    name:
+                      description: Volume name
+                      type: string
+                    readOnly:
+                      description: Mount as read-only
+                      nullable: true
+                      type: boolean
+                  required:
+                  - hostPath
+                  - mountPath
+                  - name
+                  type: object
+                nullable: true
+                type: array
               workspaceCow:
                 description: Host directory path to mount as an isolated CoW workspace
                 nullable: true
                 type: string
-              paused:
-                description: Declarative pause state; if true, freezes all microVM vCPUs
-                nullable: true
-                type: boolean
-              daxWindowSize:
-                description: VirtioFS DAX shared memory window size (e.g. "4Gi", "512Mi")
-                nullable: true
-                type: string
-              imageAcceleration:
-                description: Dragonfly Nydus RAFSv6 / EROFS image acceleration and lazy loading
-                nullable: true
-                properties:
-                  format:
-                    description: Accelerated format (rafsv6, erofs, zran)
-                    nullable: true
-                    type: string
-                  lazyLoad:
-                    description: Enable instant on-demand lazy loading of chunks
-                    nullable: true
-                    type: boolean
-                  chunkCacheDir:
-                    description: Host directory for caching downloaded chunk blobs
-                    nullable: true
-                    type: string
-                  chunkSize:
-                    description: Chunk or macro-chunk size (e.g. "4Mi", "64Mi")
-                    nullable: true
-                    type: string
-                  prefetch:
-                    description: List of paths to prefetch ahead of execution
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                type: object
             required:
             - image
             type: object
-
           status:
             nullable: true
             properties:
+              conditions:
+                description: Status conditions representing lifecycle progression
+                items:
+                  description: Standard Kubernetes-style condition object for MicroVM lifecycle tracking
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status to another
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable message explaining the condition status
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Machine-readable reason for condition's last transition
+                      nullable: true
+                      type: string
+                    status:
+                      description: 'Status: "True", "False", "Unknown"'
+                      type: string
+                    type:
+                      description: 'Type of condition: "Ready", "PodScheduled", "Initialized"'
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
               message:
                 description: Human-readable message or error description
                 nullable: true
@@ -134,7 +265,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Lifecycle phase: Pending, Running, Succeeded, Failed'
+                description: 'Lifecycle phase: Pending, Running, Paused, Succeeded, Failed'
                 type: string
               podIp:
                 description: Assigned Pod IP address

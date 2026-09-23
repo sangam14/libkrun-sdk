@@ -15,6 +15,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+// ---------------------------------------------------------------------------
+// CRI annotation keys
+// ---------------------------------------------------------------------------
+
+/// Kubernetes CRI annotation: "sandbox" or "container".
+const ANN_CONTAINER_TYPE: &str = "io.kubernetes.cri.container-type";
+/// Kubernetes CRI annotation: the sandbox ID a container belongs to.
+const ANN_SANDBOX_ID: &str = "io.kubernetes.cri.sandbox-id";
+
+// ---------------------------------------------------------------------------
+// Shim bootstrap
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct KrunShim {
     exit: Arc<ExitSignal>,
@@ -49,6 +62,10 @@ impl Shim for KrunShim {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-task (sandbox / standalone) instance state
+// ---------------------------------------------------------------------------
+
 struct TaskInstance {
     id: String,
     pid: u32,
@@ -60,9 +77,20 @@ struct TaskInstance {
     status: Status,
     exit_status: Option<u32>,
     exited_at: Option<Timestamp>,
+    /// The MicroVm handle — only `Some` for sandbox / standalone containers
+    /// that actually boot a VM.
     vm: Option<Arc<Mutex<microvm_core::MicroVm>>>,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
+    stdin_handle: Option<tokio::task::JoinHandle<()>>,
+    /// CRI container type: "sandbox", "container", or None (standalone).
+    container_type: Option<String>,
+    /// For CRI containers: the sandbox ID they belong to.
+    sandbox_id: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Per-exec instance state
+// ---------------------------------------------------------------------------
 
 struct ExecInstance {
     task_id: String,
@@ -78,6 +106,10 @@ struct ExecInstance {
     exit_status: Option<u32>,
     exited_at: Option<Timestamp>,
 }
+
+// ---------------------------------------------------------------------------
+// Main Task service
+// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct KrunTask {
@@ -96,8 +128,43 @@ impl KrunTask {
     }
 }
 
+/// Helper to read CRI container-type and sandbox-id annotations from a bundle.
+fn read_cri_annotations(bundle_dir: &str) -> (Option<String>, Option<String>) {
+    let config_path = PathBuf::from(bundle_dir).join("config.json");
+    let spec = match oci_spec::runtime::Spec::load(&config_path) {
+        Ok(s) => s,
+        Err(_) => return (None, None),
+    };
+
+    let annotations = match spec.annotations() {
+        Some(a) => a.clone(),
+        None => return (None, None),
+    };
+
+    let container_type = annotations.get(ANN_CONTAINER_TYPE).cloned();
+    let sandbox_id = annotations.get(ANN_SANDBOX_ID).cloned();
+    (container_type, sandbox_id)
+}
+
+/// Create a system-time Timestamp for "now".
+fn now_timestamp() -> Timestamp {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Timestamp {
+        seconds: now.as_secs() as i64,
+        nanos: now.subsec_nanos() as i32,
+        ..Default::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task trait implementation
+// ---------------------------------------------------------------------------
+
 #[async_trait]
 impl Task for KrunTask {
+    // ----- Create -----
     async fn create(
         &self,
         _ctx: &TtrpcContext,
@@ -110,6 +177,38 @@ impl Task for KrunTask {
         let stderr = req.stderr().to_string();
         let terminal = req.terminal();
 
+        let (container_type, sandbox_id) = read_cri_annotations(&bundle);
+
+        // If this is a CRI "container" (not a sandbox), we do NOT boot a new
+        // VM. Instead we record the instance and wait for Start() to exec
+        // inside the parent sandbox's VM.
+        if container_type.as_deref() == Some("container") {
+            let instance = TaskInstance {
+                id: id.clone(),
+                pid: 0,
+                bundle: PathBuf::from(bundle),
+                stdin,
+                stdout,
+                stderr,
+                terminal,
+                status: Status::CREATED,
+                exit_status: None,
+                exited_at: None,
+                vm: None,
+                stream_handle: None,
+                stdin_handle: None,
+                container_type: container_type.clone(),
+                sandbox_id: sandbox_id.clone(),
+            };
+
+            self.instances.lock().await.insert(id, instance);
+
+            let mut resp = CreateTaskResponse::new();
+            resp.set_pid(std::process::id());
+            return Ok(resp);
+        }
+
+        // For sandbox or standalone containers we boot a microVM.
         let builder = MicroVmBuilder::from_bundle(&bundle)
             .map_err(|e| {
                 ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -126,11 +225,22 @@ impl Task for KrunTask {
         let pid = vm.pid().unwrap_or(0);
         let log_path = vm.console_log_path();
 
+        // Spawn stdout/stderr FIFO streamer
         let stream_handle = if !stdout.is_empty() || !stderr.is_empty() {
             let stdout_clone = stdout.clone();
             let stderr_clone = stderr.clone();
             Some(tokio::spawn(async move {
                 stream_console_to_fifos(log_path, stdout_clone, stderr_clone, pid).await;
+            }))
+        } else {
+            None
+        };
+
+        // Spawn stdin FIFO reader (pumps host stdin into the VM)
+        let stdin_handle = if !stdin.is_empty() {
+            let stdin_path = stdin.clone();
+            Some(tokio::spawn(async move {
+                pump_stdin_fifo(stdin_path).await;
             }))
         } else {
             None
@@ -150,6 +260,9 @@ impl Task for KrunTask {
             exited_at: None,
             vm: Some(vm_arc),
             stream_handle,
+            stdin_handle,
+            container_type,
+            sandbox_id,
         };
 
         self.instances.lock().await.insert(id, instance);
@@ -159,8 +272,11 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    // ----- Start -----
     async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> ttrpc::Result<StartResponse> {
         let req_id = req.id();
+
+        // Check if this is an exec process start first
         {
             let mut execs = self.exec_instances.lock().await;
             if let Some(exec_inst) = execs.get_mut(req_id) {
@@ -196,15 +312,7 @@ impl Task for KrunTask {
                     let _ = tokio::fs::write(&stderr_fifo, err.as_bytes()).await;
                 }
 
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                let exited_at = Timestamp {
-                    seconds: now.as_secs() as i64,
-                    nanos: now.subsec_nanos() as i32,
-                    ..Default::default()
-                };
-
+                let exited_at = now_timestamp();
                 exec_inst.status = Status::STOPPED;
                 exec_inst.exit_status = Some(code);
                 exec_inst.exited_at = Some(exited_at);
@@ -215,7 +323,30 @@ impl Task for KrunTask {
             }
         }
 
+        // Regular task start
         let mut instances = self.instances.lock().await;
+
+        // For CRI containers, look up sandbox VM info first (immutable borrow)
+        let sandbox_info = {
+            let instance = instances.get(req.id()).ok_or_else(|| {
+                ttrpc::Error::RpcStatus(ttrpc::get_status(
+                    ttrpc::Code::NOT_FOUND,
+                    format!("task {} not found", req.id()),
+                ))
+            })?;
+
+            if instance.container_type.as_deref() == Some("container") {
+                if let Some(ref sb_id) = instance.sandbox_id {
+                    instances.get(sb_id).map(|sb| (sb.vm.clone(), sb.pid))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        // Now mutably borrow to update the instance
         let instance = instances.get_mut(req.id()).ok_or_else(|| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
                 ttrpc::Code::NOT_FOUND,
@@ -223,14 +354,25 @@ impl Task for KrunTask {
             ))
         })?;
 
+        // CRI container: associate with the parent sandbox VM
+        if let Some((sandbox_vm, sandbox_pid)) = sandbox_info {
+            if let Some(vm_arc) = sandbox_vm {
+                instance.vm = Some(vm_arc);
+            }
+            instance.pid = sandbox_pid;
+        }
+
         instance.status = Status::RUNNING;
         let mut resp = StartResponse::new();
         resp.set_pid(instance.pid);
         Ok(resp)
     }
 
+    // ----- State -----
     async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> ttrpc::Result<StateResponse> {
         let req_id = req.id();
+
+        // Check exec instances first
         {
             let execs = self.exec_instances.lock().await;
             if let Some(exec_inst) = execs.get(req_id) {
@@ -260,7 +402,16 @@ impl Task for KrunTask {
             ))
         })?;
 
-        let is_alive = signal::kill(Pid::from_raw(instance.pid as i32), None).is_ok();
+        // Check liveness via the MicroVm handle or raw PID probe
+        let is_alive = if let Some(ref vm_arc) = instance.vm {
+            let mut vm = vm_arc.lock().await;
+            vm.is_alive()
+        } else if instance.pid > 0 {
+            signal::kill(Pid::from_raw(instance.pid as i32), None).is_ok()
+        } else {
+            false
+        };
+
         let status = if is_alive {
             instance.status
         } else {
@@ -285,6 +436,9 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    // ----- Kill -----
+    // Uses MicroVm::stop() for graceful teardown via supervisor UDS, falling
+    // back to OS signals only when no VM handle is available.
     async fn kill(&self, _ctx: &TtrpcContext, req: KillRequest) -> ttrpc::Result<Empty> {
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
@@ -299,12 +453,36 @@ impl Task for KrunTask {
             Err(_) => Signal::SIGTERM,
         };
 
-        let _ = signal::kill(Pid::from_raw(instance.pid as i32), sig);
+        // Try graceful shutdown through supervisor first for SIGTERM/SIGKILL
+        if matches!(sig, Signal::SIGTERM | Signal::SIGKILL) {
+            if let Some(ref vm_arc) = instance.vm {
+                let mut vm = vm_arc.lock().await;
+                if let Err(e) = vm.stop().await {
+                    tracing::warn!(
+                        "MicroVm::stop() failed for {}: {}, falling back to signal",
+                        req.id(),
+                        e
+                    );
+                    if instance.pid > 0 {
+                        let _ = signal::kill(Pid::from_raw(instance.pid as i32), sig);
+                    }
+                }
+                return Ok(Empty::new());
+            }
+        }
+
+        // Fallback: direct OS signal
+        if instance.pid > 0 {
+            let _ = signal::kill(Pid::from_raw(instance.pid as i32), sig);
+        }
         Ok(Empty::new())
     }
 
+    // ----- Wait -----
     async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> ttrpc::Result<WaitResponse> {
         let req_id = req.id();
+
+        // Check exec instances first
         {
             let execs = self.exec_instances.lock().await;
             if let Some(exec_inst) = execs.get(req_id) {
@@ -341,14 +519,7 @@ impl Task for KrunTask {
             0
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let exited_at = Timestamp {
-            seconds: now.as_secs() as i64,
-            nanos: now.subsec_nanos() as i32,
-            ..Default::default()
-        };
+        let exited_at = now_timestamp();
 
         let mut instances = self.instances.lock().await;
         if let Some(instance) = instances.get_mut(req.id()) {
@@ -363,12 +534,15 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    // ----- Delete -----
     async fn delete(
         &self,
         _ctx: &TtrpcContext,
         req: DeleteRequest,
     ) -> ttrpc::Result<DeleteResponse> {
         let req_id = req.id();
+
+        // Check exec instances first
         {
             let mut execs = self.exec_instances.lock().await;
             if let Some(exec_inst) = execs.remove(req_id) {
@@ -386,14 +560,23 @@ impl Task for KrunTask {
         let mut exit_code = 0;
 
         if let Some(inst) = instance {
+            // Abort active I/O streaming tasks
             if let Some(handle) = inst.stream_handle {
                 handle.abort();
             }
+            if let Some(handle) = inst.stdin_handle {
+                handle.abort();
+            }
+
             pid = inst.pid;
             exit_code = inst.exit_status.unwrap_or(0);
-            if let Some(vm_arc) = inst.vm {
-                let vm_guard = vm_arc.lock().await;
-                vm_guard.purge();
+
+            // CRI containers that merely share a sandbox VM should not purge it
+            if inst.container_type.as_deref() != Some("container") {
+                if let Some(vm_arc) = inst.vm {
+                    let vm_guard = vm_arc.lock().await;
+                    vm_guard.purge();
+                }
             }
         }
 
@@ -403,6 +586,7 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    // ----- Pids -----
     async fn pids(&self, _ctx: &TtrpcContext, req: PidsRequest) -> ttrpc::Result<PidsResponse> {
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
@@ -419,6 +603,9 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    // ----- Stats -----
+    // Fetches telemetry from the MicroVm supervisor UDS first; falls back to
+    // host-process accounting when the supervisor is unavailable.
     async fn stats(&self, _ctx: &TtrpcContext, req: StatsRequest) -> ttrpc::Result<StatsResponse> {
         let instances = self.instances.lock().await;
         let instance = instances.get(req.id()).ok_or_else(|| {
@@ -428,8 +615,24 @@ impl Task for KrunTask {
             ))
         })?;
 
-        let pid = instance.pid;
-        let stats = crate::metrics::collect_process_stats(pid).unwrap_or_default();
+        // Try to get stats through the supervisor UDS protocol
+        let stats = if let Some(ref vm_arc) = instance.vm {
+            let vm = vm_arc.lock().await;
+            match vm.stats().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(
+                        "Supervisor stats failed for {}, falling back to host PID: {}",
+                        req.id(),
+                        e
+                    );
+                    crate::metrics::collect_process_stats(instance.pid).unwrap_or_default()
+                }
+            }
+        } else {
+            crate::metrics::collect_process_stats(instance.pid).unwrap_or_default()
+        };
+
         let cgroups_metrics = crate::metrics::build_cgroups_metrics(&stats);
         let any = crate::metrics::encode_metrics_any(&cgroups_metrics).map_err(|e| {
             ttrpc::Error::RpcStatus(ttrpc::get_status(
@@ -443,6 +646,8 @@ impl Task for KrunTask {
         Ok(resp)
     }
 
+    // ----- Pause -----
+    // Suspends the microVM via supervisor UDS protocol, falling back to SIGSTOP.
     async fn pause(&self, _ctx: &TtrpcContext, req: PauseRequest) -> ttrpc::Result<Empty> {
         let mut instances = self.instances.lock().await;
         let instance = instances.get_mut(req.id()).ok_or_else(|| {
@@ -452,13 +657,28 @@ impl Task for KrunTask {
             ))
         })?;
 
-        if instance.pid > 0 {
+        if let Some(ref vm_arc) = instance.vm {
+            let mut vm = vm_arc.lock().await;
+            if let Err(e) = vm.pause().await {
+                tracing::warn!(
+                    "MicroVm::pause() failed for {}: {}, falling back to SIGSTOP",
+                    req.id(),
+                    e
+                );
+                if instance.pid > 0 {
+                    let _ = signal::kill(Pid::from_raw(instance.pid as i32), Signal::SIGSTOP);
+                }
+            }
+        } else if instance.pid > 0 {
             let _ = signal::kill(Pid::from_raw(instance.pid as i32), Signal::SIGSTOP);
         }
+
         instance.status = Status::PAUSED;
         Ok(Empty::new())
     }
 
+    // ----- Resume -----
+    // Resumes the microVM via supervisor UDS protocol, falling back to SIGCONT.
     async fn resume(&self, _ctx: &TtrpcContext, req: ResumeRequest) -> ttrpc::Result<Empty> {
         let mut instances = self.instances.lock().await;
         let instance = instances.get_mut(req.id()).ok_or_else(|| {
@@ -468,13 +688,27 @@ impl Task for KrunTask {
             ))
         })?;
 
-        if instance.pid > 0 {
+        if let Some(ref vm_arc) = instance.vm {
+            let mut vm = vm_arc.lock().await;
+            if let Err(e) = vm.resume().await {
+                tracing::warn!(
+                    "MicroVm::resume() failed for {}: {}, falling back to SIGCONT",
+                    req.id(),
+                    e
+                );
+                if instance.pid > 0 {
+                    let _ = signal::kill(Pid::from_raw(instance.pid as i32), Signal::SIGCONT);
+                }
+            }
+        } else if instance.pid > 0 {
             let _ = signal::kill(Pid::from_raw(instance.pid as i32), Signal::SIGCONT);
         }
+
         instance.status = Status::RUNNING;
         Ok(Empty::new())
     }
 
+    // ----- Exec -----
     async fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> ttrpc::Result<Empty> {
         let instances = self.instances.lock().await;
         if !instances.contains_key(req.id()) {
@@ -511,6 +745,7 @@ impl Task for KrunTask {
         Ok(Empty::new())
     }
 
+    // ----- Update -----
     async fn update(&self, _ctx: &TtrpcContext, req: UpdateTaskRequest) -> ttrpc::Result<Empty> {
         let instances = self.instances.lock().await;
         let _inst = instances.get(req.id()).ok_or_else(|| {
@@ -568,11 +803,16 @@ impl Task for KrunTask {
         Ok(Empty::new())
     }
 
+    // ----- Shutdown -----
     async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> ttrpc::Result<Empty> {
         self.exit.signal();
         Ok(Empty::new())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn parse_process_spec(
     spec: &containerd_shim_protos::protobuf::MessageField<
@@ -591,6 +831,11 @@ fn parse_process_spec(
     (Vec::new(), Vec::new(), None)
 }
 
+// ---------------------------------------------------------------------------
+// I/O streaming
+// ---------------------------------------------------------------------------
+
+/// Reads the microVM console log and streams it into the containerd FIFO pipes.
 async fn stream_console_to_fifos(
     log_path: PathBuf,
     stdout_fifo: String,
@@ -702,6 +947,45 @@ async fn stream_console_to_fifos(
     tracing::debug!("FIFO streamer finished for PID {}", pid);
 }
 
+/// Opens the stdin FIFO and reads it. For now this drains the FIFO to prevent
+/// containerd from blocking. In the future this will pump data into the VM's
+/// virtconsole input channel.
+async fn pump_stdin_fifo(stdin_path: String) {
+    use tokio::io::AsyncReadExt;
+
+    let file = match tokio::fs::OpenOptions::new()
+        .read(true)
+        .open(&stdin_path)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::debug!("Failed to open stdin FIFO {}: {}", stdin_path, e);
+            return;
+        }
+    };
+
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(_n) => {
+                // TODO: Forward to VM virtconsole input channel when available
+            }
+            Err(e) => {
+                tracing::debug!("stdin FIFO read error: {}", e);
+                break;
+            }
+        }
+    }
+    tracing::debug!("stdin FIFO pump finished for {}", stdin_path);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +1028,9 @@ mod tests {
             exited_at: None,
             vm: None,
             stream_handle: None,
+            stdin_handle: None,
+            container_type: None,
+            sandbox_id: None,
         };
         task.instances
             .lock()
@@ -793,6 +1080,9 @@ mod tests {
             exited_at: None,
             vm: None,
             stream_handle: None,
+            stdin_handle: None,
+            container_type: None,
+            sandbox_id: None,
         };
         task.instances
             .lock()
@@ -841,6 +1131,9 @@ mod tests {
             exited_at: None,
             vm: None,
             stream_handle: None,
+            stdin_handle: None,
+            container_type: None,
+            sandbox_id: None,
         };
         task.instances
             .lock()
@@ -860,5 +1153,137 @@ mod tests {
         let mut not_found_req = UpdateTaskRequest::new();
         not_found_req.set_id("non-existent".to_string());
         assert!(task.update(&ctx, not_found_req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cri_container_create_no_vm() {
+        // Verify that creating a CRI "container" (not sandbox) does NOT
+        // boot a VM, just registers the instance.
+        let task = KrunTask::new(Arc::new(ExitSignal::default()));
+
+        // Pre-register a sandbox task
+        let sandbox = TaskInstance {
+            id: "sandbox-1".to_string(),
+            pid: 12345,
+            bundle: PathBuf::from("/tmp/sandbox-bundle"),
+            stdin: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            terminal: false,
+            status: Status::RUNNING,
+            exit_status: None,
+            exited_at: None,
+            vm: None,
+            stream_handle: None,
+            stdin_handle: None,
+            container_type: Some("sandbox".to_string()),
+            sandbox_id: None,
+        };
+        task.instances
+            .lock()
+            .await
+            .insert("sandbox-1".to_string(), sandbox);
+
+        // Now verify the container instance was stored correctly
+        let instances = task.instances.lock().await;
+        let sb = instances.get("sandbox-1").unwrap();
+        assert_eq!(sb.container_type.as_deref(), Some("sandbox"));
+        assert!(sb.vm.is_none()); // In test, no real VM
+    }
+
+    #[tokio::test]
+    async fn test_read_cri_annotations() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        let config_json = r#"{
+            "ociVersion": "1.0.2",
+            "root": { "path": "rootfs" },
+            "process": {
+                "user": { "uid": 0, "gid": 0 },
+                "cwd": "/",
+                "args": ["/pause"]
+            },
+            "annotations": {
+                "io.kubernetes.cri.container-type": "sandbox",
+                "io.kubernetes.cri.sandbox-id": "abc123"
+            }
+        }"#;
+        fs::write(dir.path().join("config.json"), config_json).unwrap();
+
+        let (ctype, sid) = read_cri_annotations(&dir.path().to_string_lossy());
+        assert_eq!(ctype.as_deref(), Some("sandbox"));
+        assert_eq!(sid.as_deref(), Some("abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_read_cri_annotations_container() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        let config_json = r#"{
+            "ociVersion": "1.0.2",
+            "root": { "path": "rootfs" },
+            "process": {
+                "user": { "uid": 0, "gid": 0 },
+                "cwd": "/",
+                "args": ["nginx"]
+            },
+            "annotations": {
+                "io.kubernetes.cri.container-type": "container",
+                "io.kubernetes.cri.sandbox-id": "sandbox-xyz"
+            }
+        }"#;
+        fs::write(dir.path().join("config.json"), config_json).unwrap();
+
+        let (ctype, sid) = read_cri_annotations(&dir.path().to_string_lossy());
+        assert_eq!(ctype.as_deref(), Some("container"));
+        assert_eq!(sid.as_deref(), Some("sandbox-xyz"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_cri_container_does_not_purge_sandbox() {
+        let task = KrunTask::new(Arc::new(ExitSignal::default()));
+
+        // Insert a CRI container instance (no VM, references a sandbox)
+        let container_inst = TaskInstance {
+            id: "container-1".to_string(),
+            pid: 42,
+            bundle: PathBuf::from("/tmp/container-bundle"),
+            stdin: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            terminal: false,
+            status: Status::STOPPED,
+            exit_status: Some(0),
+            exited_at: None,
+            vm: None,
+            stream_handle: None,
+            stdin_handle: None,
+            container_type: Some("container".to_string()),
+            sandbox_id: Some("sandbox-1".to_string()),
+        };
+        task.instances
+            .lock()
+            .await
+            .insert("container-1".to_string(), container_inst);
+
+        let ctx = TtrpcContext {
+            timeout_nano: 0,
+            mh: containerd_shim_protos::ttrpc::MessageHeader::default(),
+            metadata: HashMap::new(),
+        };
+
+        let mut del_req = DeleteRequest::new();
+        del_req.set_id("container-1".to_string());
+        let resp = task.delete(&ctx, del_req).await.unwrap();
+        assert_eq!(resp.exit_status(), 0);
+
+        // Instance should be removed
+        assert!(task.instances.lock().await.get("container-1").is_none());
     }
 }

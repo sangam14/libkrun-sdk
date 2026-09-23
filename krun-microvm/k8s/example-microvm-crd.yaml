@@ -3,11 +3,23 @@ kind: MicroVm
 metadata:
   name: mistral-7b-inference
   namespace: default
+  labels:
+    app.kubernetes.io/name: mistral-inference
 spec:
   image: ghcr.io/ericlbuehler/mistral.rs:cpu-latest
   vcpus: 4
   memory: 8Gi
-  port: 1234
+  daxWindowSize: 4Gi
+  networkMode: cni
+  sandbox: true
+  ports:
+    - name: http
+      hostPort: 1234
+      containerPort: 1234
+      protocol: TCP
+  allowEgress:
+    - "huggingface.co:443"
+    - "cdn-lfs.huggingface.co:443"
   cmd:
     - "mistralrs-server"
     - "--host"

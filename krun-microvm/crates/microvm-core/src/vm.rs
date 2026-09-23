@@ -144,6 +144,7 @@ impl MicroVmBuilder {
         }
         let network_annotation = bundle.spec.annotations().as_ref().and_then(|a| {
             a.get("krun.network")
+                .or_else(|| a.get("krun.io/network-mode"))
                 .or_else(|| a.get("io.katacontainers.config.hypervisor.network_model"))
         });
 
@@ -169,12 +170,36 @@ impl MicroVmBuilder {
             .spec
             .annotations()
             .as_ref()
-            .and_then(|a| a.get("krun.network.allow"))
+            .and_then(|a| a.get("krun.network.allow").or_else(|| a.get("krun.io/allow-egress")))
         {
             for target in allow_str.split(',') {
                 let trimmed = target.trim();
                 if !trimmed.is_empty() {
                     builder = builder.allow_host(trimmed);
+                }
+            }
+        }
+        for pf in bundle.port_forwards {
+            builder = builder.port_forward(pf.host, pf.guest);
+        }
+        if let Some(ref ann) = bundle.spec.annotations() {
+            if let Some(gpu_str) = ann.get("krun.gpu").or_else(|| ann.get("krun.io/gpu")) {
+                if gpu_str == "true" || gpu_str == "1" {
+                    builder = builder.gpu(true);
+                }
+            }
+            if let Some(dax_str) = ann.get("krun.dax").or_else(|| ann.get("krun.io/dax-window-size")) {
+                if dax_str == "true" || dax_str == "1" {
+                    builder = builder.dax_window_size(2 * 1024 * 1024 * 1024);
+                } else if !dax_str.is_empty() && dax_str != "false" {
+                    if let Ok(bytes) = crate::config::parse_size_to_bytes(dax_str) {
+                        builder = builder.dax_window_size(bytes);
+                    }
+                }
+            }
+            if let Some(sb_str) = ann.get("krun.sandbox").or_else(|| ann.get("krun.io/sandbox")) {
+                if sb_str == "false" || sb_str == "0" {
+                    builder = builder.sandbox(false);
                 }
             }
         }

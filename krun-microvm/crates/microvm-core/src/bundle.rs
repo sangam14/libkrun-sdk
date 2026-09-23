@@ -18,6 +18,7 @@ pub struct OciBundle {
     pub ram_mib: Option<u32>,
     pub virtiofs_mounts: Vec<VirtioFsMount>,
     pub file_mounts: Vec<(PathBuf, PathBuf)>, // (host_source, guest_destination)
+    pub port_forwards: Vec<crate::types::PortForward>,
 }
 
 impl OciBundle {
@@ -138,6 +139,69 @@ impl OciBundle {
             }
         }
 
+        // 5. Resolve port mappings from CRI / krun annotations
+        let mut port_forwards = Vec::new();
+        if let Some(ref annotations) = spec.annotations() {
+            // Check krun.ports or krun.port-mappings (e.g. "8080:80,8443:443")
+            if let Some(ports_str) = annotations
+                .get("krun.ports")
+                .or_else(|| annotations.get("krun.port-mappings"))
+                .or_else(|| annotations.get("krun.io/ports"))
+                .or_else(|| annotations.get("krun.io/port-mappings"))
+            {
+                for pair in ports_str.split(',') {
+                    let pair = pair.trim();
+                    if let Some((host_s, guest_s)) = pair.split_once(':') {
+                        if let (Ok(host), Ok(guest)) =
+                            (host_s.trim().parse::<u16>(), guest_s.trim().parse::<u16>())
+                        {
+                            port_forwards.push(crate::types::PortForward::new(host, guest));
+                        }
+                    }
+                }
+            }
+
+            // Check Kubernetes CRI port mappings: io.kubernetes.cri.port-mappings
+            // JSON format: [{"host_port": 8080, "container_port": 80, "protocol": "TCP"}]
+            if let Some(cri_ports_json) = annotations.get("io.kubernetes.cri.port-mappings") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(cri_ports_json) {
+                    if let Some(arr) = val.as_array() {
+                        for item in arr {
+                            if let (Some(h), Some(c)) = (
+                                item.get("host_port").and_then(|v| v.as_u64()),
+                                item.get("container_port").and_then(|v| v.as_u64()),
+                            ) {
+                                if h > 0 && h <= 65535 && c > 0 && c <= 65535 {
+                                    port_forwards
+                                        .push(crate::types::PortForward::new(h as u16, c as u16));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Annotation overrides for CPU and Memory
+            if let Some(cpus_str) = annotations.get("krun.cpus").or_else(|| annotations.get("krun.io/cpus")) {
+                if let Ok(c) = cpus_str.trim().parse::<u8>() {
+                    if c > 0 {
+                        vcpus = Some(c);
+                    }
+                }
+            }
+            if let Some(mem_str) = annotations
+                .get("krun.memory_mib")
+                .or_else(|| annotations.get("krun.memory"))
+                .or_else(|| annotations.get("krun.io/memory"))
+            {
+                if let Ok(m) = mem_str.trim().parse::<u32>() {
+                    if m >= 128 {
+                        ram_mib = Some(m);
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             bundle_dir,
             spec,
@@ -151,6 +215,7 @@ impl OciBundle {
             ram_mib,
             virtiofs_mounts,
             file_mounts,
+            port_forwards,
         })
     }
 }
