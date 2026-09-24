@@ -617,6 +617,25 @@ pub enum NetworkCommands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+
+    /// Launch a Cloudflare Pingora L7 Reverse Proxy Gateway or Zero-Trust Egress service
+    Pingora {
+        /// Listening host:port address (e.g. 127.0.0.1:8080)
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        listen: String,
+
+        /// Forward route rules in format: /path=IP:PORT (e.g. /api=127.0.0.1:3000)
+        #[arg(short, long)]
+        route: Vec<String>,
+
+        /// Run as Zero-Trust Egress proxy enforcing domain allowlist
+        #[arg(long)]
+        egress: bool,
+
+        /// Permitted outbound domain destinations (e.g. api.openai.com:443, *.github.com:443)
+        #[arg(long = "allow-host")]
+        allow_hosts: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2621,6 +2640,63 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                 println!("\n⚠️ Network diagnostic returned exit code {}.", resp.exit_code);
             }
         }
+
+        NetworkCommands::Pingora {
+            listen,
+            route,
+            egress,
+            allow_hosts,
+        } => {
+            if egress {
+                println!(
+                    "🌐 Starting Cloudflare Pingora Zero-Trust Egress Proxy on {}...",
+                    listen
+                );
+                if allow_hosts.is_empty() {
+                    println!("   Policy: Default-deny (all external egress blocked except loopback)");
+                } else {
+                    println!("   Allowed destinations:");
+                    for h in &allow_hosts {
+                        println!("     - {}", h);
+                    }
+                }
+                println!("   Cloud Metadata (169.254.169.254): Strictly blocked");
+                let policy = microvm_core::EgressPolicy::new(allow_hosts);
+                microvm_core::run_pingora_egress_server(&listen, policy, &[], None)?;
+            } else {
+                let mut routes_map = std::collections::HashMap::new();
+                for r in &route {
+                    if let Some((prefix, target)) = r.split_once('=') {
+                        let target_addr: std::net::SocketAddr = target.parse().with_context(|| {
+                            format!("Invalid target socket address '{}' in route '{}'", target, r)
+                        })?;
+                        routes_map.insert(
+                            prefix.to_string(),
+                            microvm_core::MicroVmServiceBackend {
+                                service_name: prefix.trim_start_matches('/').to_string(),
+                                target_addr,
+                                path_prefix: prefix.to_string(),
+                            },
+                        );
+                    } else {
+                        bail!("Invalid route specification '{}'. Expected format /prefix=IP:PORT", r);
+                    }
+                }
+                println!(
+                    "🚀 Starting Cloudflare Pingora L7 Reverse Proxy Gateway on {}...",
+                    listen
+                );
+                if routes_map.is_empty() {
+                    println!("   Warning: No routes configured. Pass --route /prefix=127.0.0.1:PORT");
+                } else {
+                    println!("   Configured MicroVM Routes:");
+                    for (prefix, backend) in &routes_map {
+                        println!("     {} -> {}", prefix, backend.target_addr);
+                    }
+                }
+                microvm_core::run_pingora_gateway_server(&listen, routes_map)?;
+            }
+        }
     }
     Ok(())
 }
@@ -4167,6 +4243,33 @@ mod tests {
                 assert_eq!(target, "api.openai.com");
             }
             _ => panic!("Expected NetworkCommands::Test"),
+        }
+
+        // network pingora
+        let cli = Cli::try_parse_from(vec![
+            "microvm",
+            "network",
+            "pingora",
+            "--listen",
+            "127.0.0.1:9090",
+            "--route",
+            "/api=127.0.0.1:3000",
+            "--allow-host",
+            "api.openai.com:443",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Pingora {
+                listen,
+                route,
+                allow_hosts,
+                ..
+            }) => {
+                assert_eq!(listen, "127.0.0.1:9090");
+                assert_eq!(route, vec!["/api=127.0.0.1:3000".to_string()]);
+                assert_eq!(allow_hosts, vec!["api.openai.com:443".to_string()]);
+            }
+            _ => panic!("Expected NetworkCommands::Pingora"),
         }
     }
 

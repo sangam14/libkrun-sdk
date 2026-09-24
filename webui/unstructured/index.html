@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>libkrun Sieve &bull; Hardware-Isolated Document Intake & AI Threat Shield</title>
+  <meta name="description" content="Detonate untrusted PDFs, Office documents, and AI Agent Skills in ephemeral, hardware-isolated libkrun microVMs with Cloudflare Pingora zero-trust egress shielding.">
+  
+  <!-- Modern Typography from Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="index.css">
+</head>
+<body class="dark-theme">
+  <!-- Dynamic Glow Background Canvas -->
+  <div class="glow-bg-layer" aria-hidden="true">
+    <div class="glow-orb orb-primary"></div>
+    <div class="glow-orb orb-secondary"></div>
+    <div class="glow-orb orb-accent"></div>
+    <div class="cyber-grid-overlay"></div>
+  </div>
+
+  <!-- Top Navigation Header -->
+  <header class="app-header" id="app-header">
+    <div class="header-container">
+      <div class="brand-group">
+        <div class="brand-logo-container">
+          <div class="shield-icon-wrapper">
+            <svg class="shield-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4" stroke="var(--accent-emerald)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">libkrun <span class="brand-highlight">Sieve</span></div>
+            <div class="brand-subtitle">Hardware MicroVM AI Shield</div>
+          </div>
+        </div>
+
+        <div class="hypervisor-badge" id="hypervisor-status-badge">
+          <span class="status-pulse-dot"></span>
+          <span class="badge-label">Apple Silicon HVF / KVM Engine</span>
+          <span class="badge-tag">v0.9.0 Pingora L7</span>
+        </div>
+      </div>
+
+      <nav class="nav-links">
+        <button class="nav-link active" id="nav-scanner-btn" data-target="scanner-view">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          Document Scanner
+        </button>
+        <button class="nav-link" id="nav-telemetry-btn" data-target="telemetry-view">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          MicroVM Telemetry
+        </button>
+        <button class="nav-link" id="nav-pingora-btn" data-target="pingora-view">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          Pingora Egress
+        </button>
+      </nav>
+
+      <div class="header-actions">
+        <button class="btn btn-ghost" id="view-cli-btn" title="View equivalent microvm CLI command">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          CLI Syntax
+        </button>
+        <button class="btn btn-primary" id="btn-quick-detonate">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          Detonate Sample PDF
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Wrapper -->
+  <main class="main-wrapper">
+    <!-- Hero Section -->
+    <section class="hero-section">
+      <div class="hero-badge">
+        <span class="badge-icon">🛡️</span>
+        <span>Beyond Static Scanners &bull; Full Hardware Isolation Boundary</span>
+      </div>
+      <h1 class="hero-title">
+        Scan &amp; Detonate Untrusted Documents <br>
+        <span class="gradient-text">Inside Ephemeral MicroVMs</span>
+      </h1>
+      <p class="hero-description">
+        That PDF passed VirusTotal and ClamAV. But does it contain <strong>hidden white-text prompt injections</strong>, <strong>SSRF cloud metadata beacons</strong>, or <strong>zero-day Poppler exploits</strong> targeting your AI Agents?
+        Inspect, sanitize, and run untrusted payloads in an isolated Apple Silicon / KVM microVM in <strong>&lt; 75ms</strong>.
+      </p>
+
+      <div class="hero-metrics-bar">
+        <div class="metric-item">
+          <div class="metric-value">74<span class="metric-unit">ms</span></div>
+          <div class="metric-label">MicroVM Cold Boot</div>
+        </div>
+        <div class="metric-divider"></div>
+        <div class="metric-item">
+          <div class="metric-value">0<span class="metric-unit">Leaked</span></div>
+          <div class="metric-label">Host Escapes (CoW Isolated)</div>
+        </div>
+        <div class="metric-divider"></div>
+        <div class="metric-item">
+          <div class="metric-value">100<span class="metric-unit">%</span></div>
+          <div class="metric-label">Pingora Egress Filtering</div>
+        </div>
+        <div class="metric-divider"></div>
+        <div class="metric-item">
+          <div class="metric-value">169.254<span class="metric-unit">Defended</span></div>
+          <div class="metric-label">SSRF Metadata Drop</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Scanner / Ingestion Studio Card -->
+    <section class="scanner-card glass-panel" id="scanner-view">
+      <!-- Media Mode Selectors -->
+      <div class="scanner-header-tabs">
+        <div class="mode-tabs" role="tablist">
+          <button class="mode-tab active" id="tab-documents" role="tab" aria-selected="true" data-mode="documents">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            Documents (PDF, DOCX, TXT)
+          </button>
+          <button class="mode-tab" id="tab-skills" role="tab" aria-selected="false" data-mode="skills">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            AI Skills &amp; Prompts (MD)
+          </button>
+          <button class="mode-tab" id="tab-data" role="tab" aria-selected="false" data-mode="data">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            Data Blobs (JSON, YAML, CSV)
+          </button>
+          <button class="mode-tab" id="tab-code" role="tab" aria-selected="false" data-mode="code">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            Code &amp; Binaries
+          </button>
+        </div>
+
+        <div class="security-controls-toggle">
+          <label class="switch-toggle" title="Enable Cloudflare Pingora Egress Proxy with Zero-Trust Domain Whitelisting">
+            <input type="checkbox" id="toggle-pingora-egress" checked>
+            <span class="switch-slider"></span>
+            <span class="switch-text">Pingora Egress Shield</span>
+          </label>
+          <label class="switch-toggle" title="Mount host filesystem as isolated Copy-on-Write (CoW)">
+            <input type="checkbox" id="toggle-cow-sandbox" checked>
+            <span class="switch-slider"></span>
+            <span class="switch-text">VirtioFS CoW</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Drag & Drop Zone -->
+      <div class="dropzone-container" id="dropzone">
+        <input type="file" id="file-input" class="visually-hidden" accept=".pdf,.docx,.doc,.xlsx,.pptx,.txt,.md,.json,.yaml,.yml,.csv,.html,.xml,.py,.sh">
+        
+        <div class="dropzone-content">
+          <div class="upload-icon-pulse">
+            <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+
+          <h3 class="dropzone-heading">Drop any document here or <span class="browse-link">browse files</span></h3>
+          <p class="dropzone-subtext">Supported: PDF, Word DOCX, Markdown, Text, JSON/YAML, Python, Bash (Max 50MB)</p>
+          
+          <div class="dropzone-pills">
+            <span class="pill"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Automated MicroVM Detonation</span>
+            <span class="pill"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Indirect Prompt Injection Radar</span>
+            <span class="pill"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> In-Flight Secret Shielding</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sample Payloads Library -->
+      <div class="samples-library">
+        <div class="samples-header">
+          <div class="samples-divider"></div>
+          <span class="samples-badge">⚡ Quick-Test Threat Vector Presets</span>
+          <div class="samples-divider"></div>
+        </div>
+
+        <div class="samples-grid">
+          <!-- Sample 1 -->
+          <div class="sample-card critical" data-sample="indirect-injection-pdf" id="sample-pdf-threat">
+            <div class="sample-top">
+              <span class="sample-tag threat-critical">🔴 Prompt Injection</span>
+              <span class="sample-type">PDF</span>
+            </div>
+            <div class="sample-name">Invoice_Audit_2026.pdf</div>
+            <div class="sample-desc">Embedded 0.1pt font invisible jailbreak instruct agent to exfiltrate OpenAI API keys.</div>
+          </div>
+
+          <!-- Sample 2 -->
+          <div class="sample-card warning" data-sample="ssrf-skill-md" id="sample-skill-threat">
+            <div class="sample-top">
+              <span class="sample-tag threat-warning">🟡 SSRF Egress Beacon</span>
+              <span class="sample-type">MD</span>
+            </div>
+            <div class="sample-name">trading_agent_skill.md</div>
+            <div class="sample-desc">Autonomous skill script attempting to fetch AWS metadata (169.254.169.254).</div>
+          </div>
+
+          <!-- Sample 3 -->
+          <div class="sample-card token-bomb" data-sample="token-bomb-json" id="sample-json-threat">
+            <div class="sample-top">
+              <span class="sample-tag threat-bomb">🟣 Token Ceiling Bomb</span>
+              <span class="sample-type">JSON</span>
+            </div>
+            <div class="sample-name">infinite_stream_context.json</div>
+            <div class="sample-desc">Recursive nesting designed to exhaust agent context window and budget.</div>
+          </div>
+
+          <!-- Sample 4 -->
+          <div class="sample-card safe" data-sample="clean-legal-pdf" id="sample-clean-pdf">
+            <div class="sample-top">
+              <span class="sample-tag threat-safe">🟢 Verified Clean</span>
+              <span class="sample-type">PDF</span>
+            </div>
+            <div class="sample-name">Vendor_Master_Agreement.pdf</div>
+            <div class="sample-desc">Legitimate standard enterprise contract with clean layout and no hidden payloads.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live Execution & Detonation Workspace (Appears during/after scan) -->
+    <section class="detonation-workspace glass-panel" id="detonation-view">
+      <div class="detonation-header">
+        <div class="detonation-title-group">
+          <div class="status-indicator-badge" id="detonation-status-badge">
+            <span class="detonation-pulse" id="detonation-pulse"></span>
+            <span id="detonation-status-text">MicroVM Sandboxing Active</span>
+          </div>
+          <div class="detonation-target-info">
+            <span class="target-filename" id="target-filename">Invoice_Audit_2026.pdf</span>
+            <span class="target-meta" id="target-meta">Size: 42.8 KB &bull; SHA-256: 7f8a9...b4e1</span>
+          </div>
+        </div>
+
+        <div class="detonation-header-actions">
+          <button class="btn btn-outline btn-sm" id="btn-restart-scan">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Rescan
+          </button>
+          <button class="btn btn-primary btn-sm" id="btn-export-sanitized">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export Sanitized Text
+          </button>
+        </div>
+      </div>
+
+      <!-- Execution Stages Pipeline -->
+      <div class="pipeline-progress-bar">
+        <div class="pipeline-step step-done" id="step-static">
+          <div class="step-circle"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>
+          <div class="step-name">1. Structural Parser</div>
+          <div class="step-sub">Layer Extraction</div>
+        </div>
+        <div class="pipeline-connector connector-done" id="conn-1"></div>
+        <div class="pipeline-step step-active" id="step-boot">
+          <div class="step-circle"><div class="mini-spinner"></div></div>
+          <div class="step-name">2. MicroVM Boot</div>
+          <div class="step-sub">74ms HVF Sandbox</div>
+        </div>
+        <div class="pipeline-connector" id="conn-2"></div>
+        <div class="pipeline-step" id="step-cow">
+          <div class="step-circle">3</div>
+          <div class="step-name">3. VirtioFS CoW</div>
+          <div class="step-sub">Isolated Execution</div>
+        </div>
+        <div class="pipeline-connector" id="conn-3"></div>
+        <div class="pipeline-step" id="step-pingora">
+          <div class="step-circle">4</div>
+          <div class="step-name">4. Pingora Egress</div>
+          <div class="step-sub">SSRF Interception</div>
+        </div>
+        <div class="pipeline-connector" id="conn-4"></div>
+        <div class="pipeline-step" id="step-ai">
+          <div class="step-circle">5</div>
+          <div class="step-name">5. AI Shield Report</div>
+          <div class="step-sub">Threat Verdict</div>
+        </div>
+      </div>
+
+      <!-- Detonation Split View -->
+      <div class="detonation-split-grid">
+        <!-- Left: Live Threat Analysis & Content Sandbox -->
+        <div class="detonation-left-panel">
+          <!-- Threat Verdict Banner -->
+          <div class="verdict-banner banner-danger" id="verdict-banner">
+            <div class="verdict-badge-icon">🚨</div>
+            <div class="verdict-details">
+              <div class="verdict-title" id="verdict-title">CRITICAL THREAT: Indirect Prompt Injection Quarantined</div>
+              <div class="verdict-desc" id="verdict-desc">
+                Malicious instruction detected in hidden 0.1pt font layer. Blocked before feeding to downstream LLM agent.
+              </div>
+            </div>
+            <div class="verdict-score" id="verdict-score">
+              <span class="score-num">98</span>
+              <span class="score-label">Risk Index</span>
+            </div>
+          </div>
+
+          <!-- Analysis Findings Tabs -->
+          <div class="findings-card">
+            <div class="findings-header">
+              <div class="findings-tabs">
+                <button class="finding-tab active" id="tab-findings-threats">Threat Vectors (<span id="threat-count">3</span>)</button>
+                <button class="finding-tab" id="tab-findings-sanitized">Sanitized Text</button>
+                <button class="finding-tab" id="tab-findings-raw">Raw Payload Diff</button>
+              </div>
+              <span class="sanitized-badge" id="sanitized-status">🛡️ Neutralized by libkrun</span>
+            </div>
+
+            <!-- Panel 1: Threat Vectors Breakdown -->
+            <div class="finding-panel active" id="panel-threats">
+              <div class="threat-list" id="threat-list">
+                <!-- Injected via JS -->
+              </div>
+            </div>
+
+            <!-- Panel 2: Sanitized Clean Text for LLM -->
+            <div class="finding-panel" id="panel-sanitized">
+              <div class="code-block-wrapper">
+                <div class="code-block-header">
+                  <span>Sanitized Document Body (Safe for Agent Prompt Injection)</span>
+                  <button class="btn-copy-code" id="btn-copy-sanitized">Copy Text</button>
+                </div>
+                <pre class="sanitized-code" id="sanitized-output"></pre>
+              </div>
+            </div>
+
+            <!-- Panel 3: Raw Payload Diff -->
+            <div class="finding-panel" id="panel-raw">
+              <div class="code-block-wrapper">
+                <div class="code-block-header">
+                  <span>Decompiled Document Inspection &amp; Hidden Injection Payloads</span>
+                  <span class="diff-legend"><span class="diff-tag-red">+ Injected Text</span></span>
+                </div>
+                <pre class="diff-code" id="raw-diff-output"></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: MicroVM Hardware & Pingora Telemetry Console -->
+        <div class="detonation-right-panel">
+          <!-- MicroVM Hardware Telemetry Card -->
+          <div class="telemetry-card">
+            <div class="card-header-sm">
+              <div class="header-left">
+                <span class="card-icon">⚡</span>
+                <span class="card-title-sm">MicroVM Runtime Telemetry</span>
+              </div>
+              <span class="hw-chip-tag">Apple Silicon M-Series HVF</span>
+            </div>
+
+            <div class="telemetry-grid">
+              <div class="telemetry-cell">
+                <div class="t-label">Instance ID</div>
+                <div class="t-value mono" id="t-vm-id">vm-sec-8a29f</div>
+              </div>
+              <div class="telemetry-cell">
+                <div class="t-label">Cold Boot Latency</div>
+                <div class="t-value mono text-emerald" id="t-boot-time">74.2 ms</div>
+              </div>
+              <div class="telemetry-cell">
+                <div class="t-label">Memory RSS (vRAM)</div>
+                <div class="t-value mono" id="t-mem-rss">18.4 MB / 512 MB</div>
+              </div>
+              <div class="telemetry-cell">
+                <div class="t-label">VirtioFS CoW Mount</div>
+                <div class="t-value mono text-cyan" id="t-cow-status">apfs_clonefile (active)</div>
+              </div>
+              <div class="telemetry-cell">
+                <div class="t-label">Egress Engine</div>
+                <div class="t-value mono text-violet" id="t-egress-mode">Pingora 0.9.0 L7</div>
+              </div>
+              <div class="telemetry-cell">
+                <div class="t-label">LLM Token Meter</div>
+                <div class="t-value mono text-amber" id="t-token-budget">148 / 10,000 max</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Emulated MicroVM Guest Terminal -->
+          <div class="terminal-card">
+            <div class="terminal-header">
+              <div class="terminal-dots">
+                <span class="t-dot red"></span>
+                <span class="t-dot yellow"></span>
+                <span class="t-dot green"></span>
+              </div>
+              <span class="terminal-title">libkrun-guest /dev/ttyAMA0 &bull; console.log</span>
+              <button class="btn-clear-term" id="btn-clear-terminal">Clear</button>
+            </div>
+            <div class="terminal-body" id="terminal-body">
+              <div class="term-line term-dim">[    0.000000] Linux version 6.6.30-asahi-krun (root@runner) (gcc 13.2.0) #1 SMP PREEMPT</div>
+              <div class="term-line term-dim">[    0.012480] CPU: 2 vCPUs detected (Apple Silicon M-Series virtualized)</div>
+              <div class="term-line term-cyan">[    0.024102] virtio-fs: mounting /dev/virtiofs0 at /sandbox with CoW overlay</div>
+              <div class="term-line term-green">[    0.074211] init.krun: started microVM PID 1 in 74.2ms</div>
+              <div class="term-line term-yellow">[PingoraEgress] Intercepted DNS query for 169.254.169.254:443 -> DROPPED (SSRF Rule)</div>
+              <div class="term-line term-red">[AI-SHIELD] DETECTED: 0.1pt font indirect prompt injection string in stream</div>
+              <div class="term-line term-green">[SANITIZER] Extracted clean 4,190 bytes; quarantined 128 bytes malicious payload</div>
+              <div class="term-line term-dim">[    0.141208] microvm runner: exit status 0 (clean isolation shutdown)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CLI Syntax Modal / Drawer -->
+    <div class="cli-drawer-overlay" id="cli-drawer">
+      <div class="cli-drawer-panel glass-panel">
+        <div class="drawer-header">
+          <div class="drawer-title">
+            <span class="drawer-icon">💻</span>
+            <span>CLI Reproduction Command</span>
+          </div>
+          <button class="btn-close-drawer" id="btn-close-cli-drawer">&times;</button>
+        </div>
+        <p class="drawer-subtext">You can execute the exact same hardware-isolated document detonation directly from your terminal using <code>microvm</code>:</p>
+        
+        <div class="code-block-wrapper">
+          <div class="code-block-header">
+            <span>Terminal Shell</span>
+            <button class="btn-copy-code" id="btn-copy-cli-command">Copy Command</button>
+          </div>
+          <pre class="cli-command-code" id="cli-command-code">
+# 1. Run hardware-isolated document extraction in ephemeral microVM:
+microvm run \
+    --workspace-cow ./inbox:/docs \
+    --allow-host api.openai.com:443 \
+    --max-tokens 5000 \
+    --gpu \
+    alpine:latest -- sh -c "pdftotext /docs/Invoice_Audit_2026.pdf /docs/extracted.txt"
+
+# 2. Launch Cloudflare Pingora L7 reverse proxy gateway:
+microvm network pingora \
+    --listen 127.0.0.1:8080 \
+    --egress \
+    --allow-host api.openai.com:443
+          </pre>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="app-footer">
+    <div class="footer-container">
+      <div class="footer-brand">
+        <div class="footer-logo">libkrun-sdk</div>
+        <p class="footer-tagline">Pure-Rust hardware-virtualized container execution, AI agent sandboxing, and Pingora ingress/egress engine.</p>
+      </div>
+
+      <div class="footer-links-group">
+        <div class="footer-col">
+          <h4>Core Subsystems</h4>
+          <a href="#">MicroVM Hypervisor</a>
+          <a href="#">VirtioFS DAX</a>
+          <a href="#">virtio-gpu Metal</a>
+          <a href="#">Cloudflare Pingora L7</a>
+        </div>
+        <div class="footer-col">
+          <h4>AI Security</h4>
+          <a href="#">Prompt Injection Radar</a>
+          <a href="#">SSRF Cloud Defense</a>
+          <a href="#">Secret Shielding</a>
+          <a href="#">LLM Token Ceiling</a>
+        </div>
+        <div class="footer-col">
+          <h4>Repository</h4>
+          <a href="https://github.com/containers/libkrun" target="_blank" rel="noreferrer">libkrun Upstream</a>
+          <a href="https://github.com/cloudflare/pingora" target="_blank" rel="noreferrer">Cloudflare Pingora</a>
+          <a href="https://github.com/AsahiLinux/m1n1" target="_blank" rel="noreferrer">Asahi Linux m1n1</a>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p>&copy; 2026 libkrun-sdk authors. Licensed under Apache-2.0.</p>
+      <div class="footer-status-pill">
+        <span class="status-pulse-dot"></span>
+        <span>All MicroVM Subsystems Operational</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

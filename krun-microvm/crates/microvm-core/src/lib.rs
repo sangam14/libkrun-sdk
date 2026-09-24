@@ -25,7 +25,10 @@ pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};
 pub use metrics::{collect_process_stats, export_prometheus_metrics, ProcessStats};
 pub use net::{
-    DnsConfig, EgressPolicy, EgressProxyServer, LlmTokenBudget, NetworkMode, SecretSubstitution,
+    create_pingora_egress_service, create_pingora_gateway_service, DnsConfig, EgressPolicy,
+    EgressProxyServer, LlmTokenBudget, MicroVmServiceBackend, NetworkMode, PingoraEgressProxy,
+    PingoraMicroVmGateway, PingoraRequestContext, run_pingora_egress_server,
+    run_pingora_gateway_server, SecretSubstitution,
 };
 pub use oci::{ArtifactMetadata, ImageReference, OciArtifact, OciClient, OciLayout};
 pub use preflight::{CheckResult, Preflight};

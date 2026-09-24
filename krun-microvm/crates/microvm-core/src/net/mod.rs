@@ -6,10 +6,16 @@ use std::path::{Path, PathBuf};
 
 pub mod egress;
 pub mod gvproxy;
+pub mod pingora;
 
 pub use crate::types::PortForward;
 pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
 pub use gvproxy::{GvproxyConfig, GvproxyInstance};
+pub use pingora::{
+    create_pingora_egress_service, create_pingora_gateway_service, MicroVmServiceBackend,
+    PingoraEgressProxy, PingoraMicroVmGateway, PingoraRequestContext,
+    run_pingora_egress_server, run_pingora_gateway_server,
+};
 
 /// Network mode for the microVM provider abstraction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

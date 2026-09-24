@@ -75,6 +75,15 @@ microvm sandbox claude \
 microvm cherry-pick <sandbox-id>
 ```
 
+### 5. Launch the Unstructured Document Intake & AI Threat Shield (`/unstructured`)
+```bash
+# Start the Elixir OTP server with Web UI and REST API:
+cd krun-microvm/sdks/elixir && PORT=4005 mix run --no-halt
+
+# Open the Web UI:
+open http://localhost:4005/unstructured
+```
+
 ---
 
 ## 🚀 Why libkrun-sdk?
@@ -428,6 +437,76 @@ services:
 - **Seamless Name Resolution**: Inside `web`, requests to `http://api:5000` resolve automatically to the API service. Inside `api`, `postgres://db:5432` resolves seamlessly to the database service.
 - **Autonomous Resilient DNS Engine**: The microVM engine parses host nameservers, automatically filters broken systemd-resolved loopback stubs (`127.0.0.53` and `127.0.0.1`), and configures resilient fallback resolvers (`8.8.8.8`, `1.1.1.1`).
 - **Custom Hardware Attributes**: Set custom MAC addresses and MTUs with `--mac 5a:94:ef:e4:0c:ee` and `--mtu 9000`.
+
+---
+
+### 5. Cloudflare Pingora L7 Reverse Proxy Gateway & Zero-Trust Egress
+
+Integrated directly with [Cloudflare Pingora](https://github.com/cloudflare/pingora) (`0.9.0`), `libkrun-sdk` provides an ultra-low-latency, pure-Rust multi-threaded L7 reverse proxy and ingress/egress gateway:
+
+- **L7 Ingress Routing & Dynamic Service Load Balancing**: Route external HTTP/HTTPS traffic to microVM and Compose backends via longest prefix matching with connection pooling and keep-alive reuse (`microvm network pingora --listen 127.0.0.1:8080 --route /api=127.0.0.1:3000 --route /web=127.0.0.1:8000`).
+- **Zero-Trust Egress Defense**: High-throughput egress proxy with strict default-deny domain allowlisting, wildcard domain matching (`*.openai.com`), and automatic blocking of cloud metadata service SSRF (`169.254.169.254`).
+- **In-Flight Secret Substitution**: Replaces sensitive placeholders (`krun-secret:KEY`) on egress requests with actual secrets directly in Pingora filters before forwarding upstream.
+- **Streaming LLM Token Budgeting**: Inspects downstream response chunks to calculate token expenditures and enforce hard token ceilings in real time.
+
+```bash
+# Launch a Cloudflare Pingora L7 Reverse Proxy Gateway for MicroVM services:
+microvm network pingora \
+    --listen 127.0.0.1:8080 \
+    --route /api=127.0.0.1:3000 \
+    --route /web=127.0.0.1:8000
+
+# Launch a Cloudflare Pingora Zero-Trust Egress Proxy with domain allowlisting:
+microvm network pingora \
+    --listen 127.0.0.1:8080 \
+    --egress \
+    --allow-host api.openai.com:443 \
+    --allow-host "*.github.com:443"
+```
+
+---
+
+### 6. Unstructured Document Intake & AI Threat Shield (`/unstructured` & Elixir SDK)
+
+`libkrun-sdk` provides an end-to-end **Hardware-Isolated Document Ingestion & AI Threat Shield** accessible via an interactive Cyber-Obsidian Web UI at route **`/unstructured`** and an official **Elixir SDK (`Krun.Unstructured`)**.
+
+#### Why `libkrun Sieve` is Superior to Static Scanners (e.g. Sieve)
+- **True Hardware Virtualization**: Executes untrusted document parsing inside an ephemeral Apple Silicon Hypervisor / Linux KVM container booted in **< 75ms** (instead of relying solely on brittle regexes).
+- **Zero-Day Parser Exploit Defense**: Protects against PDF parser RCEs (Poppler, Ghostscript, LibreOffice) by confining parsing processes to guest PID 1.
+- **VirtioFS Copy-on-Write (`clonefile` / `reflink`)**: Host files are never mutated; all guest writes remain trapped in the isolated CoW layer.
+- **Cloudflare Pingora 0.9.0 Egress Interception**: Drops SSRF beacons to AWS/Azure/GCP metadata (`169.254.169.254`) and external C2 listeners.
+- **Unstructured.io Schema Elements**: Partitions documents into `Title`, `NarrativeText`, `Header`, `ListItem`, `Table`, and `CodeSnippet` objects ready for LLM / RAG ingestion.
+- **Prompt Injection Radar**: Flags and neutralizes indirect prompt injections (e.g. hidden 0.1pt font white-text) and zero-width Unicode steganography.
+
+#### Elixir SDK Usage
+```elixir
+# 1. Partition an unstructured document into structured schema elements:
+{:ok, elements} = Krun.partition("# Financial Report\nQ3 ARR grew by 42%.", filename: "report.md")
+
+# 2. Scan document for AI threats (prompt injection, SSRF, zero-width chars):
+{:ok, scan} = Krun.scan_threats(untrusted_pdf_text, filename: "invoice.pdf")
+if scan.is_threat do
+  IO.puts("Threat quarantined! Risk Score: #{scan.risk_score}")
+  IO.puts(scan.sanitized_text) # Clean sanitized text safe for LLMs
+end
+
+# 3. Full microVM hardware detonation with live telemetry:
+{:ok, report} = Krun.detonate(untrusted_pdf_text, filename: "invoice.pdf")
+IO.inspect(report.telemetry)
+```
+
+#### Web UI & REST API Endpoints
+```bash
+# Launch server:
+PORT=4005 mix run --no-halt
+
+# Endpoints:
+# • GET  /unstructured              - Interactive Cyber-Obsidian Web UI
+# • GET  /api/unstructured/health   - Engine health & telemetry metadata
+# • POST /api/unstructured/partition- Partition document into JSON elements
+# • POST /api/unstructured/scan     - Detect AI threats and return risk score
+# • POST /api/unstructured/detonate - Execute microVM detonation & report
+```
 
 ---
 

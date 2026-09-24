@@ -32,3 +32,9 @@ build/
 m1n1/
 asahi-*/
 payloads/
+
+# Elixir build artifacts
+**/_build/
+**/deps/
+*.ez
+.elixir_ls/
