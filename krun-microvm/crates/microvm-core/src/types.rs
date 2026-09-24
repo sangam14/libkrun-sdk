@@ -165,6 +165,14 @@ pub struct RunnerConfig {
     #[serde(default)]
     pub proxy_port: Option<u16>,
     #[serde(default)]
+    pub mac_address: Option<String>,
+    #[serde(default)]
+    pub mtu: Option<usize>,
+    #[serde(default)]
+    pub dns_servers: Vec<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
     pub supervisor_sock_path: Option<PathBuf>,
 }
 

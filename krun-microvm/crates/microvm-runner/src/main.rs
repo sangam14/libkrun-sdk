@@ -199,6 +199,12 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             .unwrap_or_else(|| "/tmp/gvproxy.sock".to_string());
         eprintln!("[microvm-runner] Spawning in-runner gvproxy user-space network on {sock_path}");
         let mut gvproxy_cfg = microvm_core::net::GvproxyConfig::new(&sock_path);
+        if let Some(ref mac) = cfg.mac_address {
+            gvproxy_cfg.guest_mac = mac.clone();
+        }
+        if let Some(mtu) = cfg.mtu {
+            gvproxy_cfg.mtu = mtu;
+        }
         for pf in &cfg.port_forwards {
             gvproxy_cfg = gvproxy_cfg.add_forward(pf.host, pf.guest);
         }
@@ -208,11 +214,19 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         let inst = gvproxy_cfg
             .start()
             .context("Failed to start gvproxy network in runner")?;
-        ctx.add_net_unixstream(Some(&sock_path), None)
+        let mac_bytes = cfg
+            .mac_address
+            .as_deref()
+            .and_then(|m| microvm_core::net::parse_mac_address(m).ok());
+        ctx.add_net_unixstream_with_mac(Some(&sock_path), None, mac_bytes)
             .context("Failed to add virtio-net unixstream for gvproxy")?;
         Some(inst)
     } else if let Some(ref sock_path) = cfg.net_sock_path {
-        ctx.add_net_unixstream(Some(sock_path), None)
+        let mac_bytes = cfg
+            .mac_address
+            .as_deref()
+            .and_then(|m| microvm_core::net::parse_mac_address(m).ok());
+        ctx.add_net_unixstream_with_mac(Some(sock_path), None, mac_bytes)
             .context("Failed to add virtio-net unixstream")?;
         None
     } else if !cfg.port_forwards.is_empty() {

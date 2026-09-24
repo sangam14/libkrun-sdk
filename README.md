@@ -15,7 +15,7 @@
   Sub-100ms cold boot times • Apple Silicon Metal & Linux DRM Venus GPU acceleration • Native Docker Compose orchestration • Zero-trust AI agent sandboxing • Zero CGO & zero runtime overhead.
 </p>
 
-[Quickstart](#-quickstart-in-30-seconds) • [Why libkrun-sdk?](#-why-libkrun-sdk) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architecture--comparison) • [AI Sandboxing](#-ai-agent-sandboxing--gpu) • [Kubernetes](#-kubernetes--containerd-integration) • [SDKs](#-multi-language-client-sdks)
+[Quickstart](#-quickstart-in-30-seconds) • [Why libkrun-sdk?](#-why-libkrun-sdk) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architecture--comparison) • [AI Sandboxing](#-ai-agent-sandboxing--gpu) • [Kubernetes](#-kubernetes--containerd-integration) • [Asahi & m1n1](#-asahi-linux--m1n1-boot-integration-apple-silicon) • [SDKs](#-multi-language-client-sdks)
 
 ---
 
@@ -286,6 +286,229 @@ microvm run \
 
 ---
 
+## 🌐 Advanced MicroVM Networking & Zero-Trust Security
+
+`libkrun-sdk` provides a versatile, defense-in-depth networking architecture engineered for everything from local rootless development to multi-tenant cloud Kubernetes clusters:
+
+```mermaid
+graph TD
+    subgraph "MicroVM Guest Isolation"
+        APP["Container Application / AI Agent"]
+        GK["Guest Linux Kernel"]
+        APP -->|"POSIX Sockets (AF_INET/AF_UNIX)"| GK
+    end
+
+    subgraph "Networking Abstraction Layer"
+        TSI["⚡ TSI: Transparent Socket Impersonation (AF_VSOCK Bypass)"]
+        GVP["🔀 gvproxy: Rootless Virtio-Net Stack (DHCP + DNS + NAT)"]
+        CNI_NET["☸️ CNI: Kubernetes Pod Network Namespace (passt / veth)"]
+        TAP_NET["🏎️ TAP: Line-Rate Linux Bridge (tap0 -> br0)"]
+        AIR["🛡️ None: Strict Air-Gapped Isolation (lo only)"]
+    end
+
+    subgraph "Zero-Trust Egress Engine"
+        EGR["🛑 Default-Deny Egress Firewall"]
+        META["🚫 Cloud Metadata Defense (Blocks 169.254.169.254)"]
+        SEC["🔑 In-Flight Secret Substitution (krun-secret:KEY)"]
+        METER["📊 Hard LLM Token Ceiling & Metering"]
+    end
+
+    GK -->|"tsi_hijack"| TSI
+    GK -->|"virtio-net"| GVP
+    GK -->|"virtio-net"| CNI_NET
+    GK -->|"virtio-net"| TAP_NET
+    GK -->|"air-gapped"| AIR
+
+    TSI --> EGR
+    GVP --> EGR
+    CNI_NET --> EGR
+    EGR --> META
+    META --> SEC
+    SEC --> METER
+    METER -->|"Outbound Requests"| WAN["Internet / Upstream APIs"]
+```
+
+### 1. Network Driver Modes Comparison
+
+| Mode | Backend | Isolation Level | Root Required? | Virtual NIC (`eth0`) | IP / Subnet Assignment | Latency / Overhead | Recommended Workload |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **`tsi`** *(default)* | AF_VSOCK In-Process | Socket Impersonation | ❌ No | Loopback only | Host-Shared (`127.0.0.1`) | Near 0ms / Zero-Copy | Developer containers, CLI tools, high-IOPS web services |
+| **`gvproxy`** | Virtio-Net + gVisor | User-Space L2 Virtual Switch | ❌ No | Real `eth0` | Virtual DHCP (`192.168.127.2/24`) | < 1ms / Micro-virtualized | Rootless desktop VMs, VPNs, custom routing, raw packet sockets |
+| **`cni`** | Virtio-Net + Netns | Kubernetes Pod Namespace | ❌ No (via CNI) | Pod Veth / Passt | CNI IPAM Subnet | Line-rate bare metal | Kubernetes Pods, containerd CRI, Kind/K3s/EKS-A clusters |
+| **`unix`** | Virtio-Net | External User-space Switch | ❌ No | Real `eth0` | Switch Assigned | Minimal | Custom SDN proxies, vfkit on macOS, QEMU bridge |
+| **`none`** | No interfaces | Physical Isolation Boundary | ❌ No | Loopback only | None (`127.0.0.1` only) | Zero Network | High-security untrusted code execution, air-gapped sandboxes |
+
+---
+
+### 2. First-Class CLI Network Management (`microvm network`)
+
+Manage, inspect, and diagnose microVM networks with dedicated native commands:
+
+```bash
+# List all active microVM networks, modes, IPs, and port mappings:
+microvm network ls
+
+# Detailed deep-dive into a microVM's network stack & security rules:
+microvm network inspect <vm-id>
+
+# Tabulate active published host-to-guest ports with direct local endpoints:
+microvm network ports
+
+# Run live in-guest network connectivity, DNS resolution, and egress diagnostic probes:
+microvm network test <vm-id> api.openai.com
+```
+
+#### Example Output: `microvm network inspect`
+```text
+🌐 MicroVM Network Topology & Security: vm-49fa81
+-----------------------------------------------------------------
+  Status:              ● Running (PID 28419)
+  Network Mode:        gvproxy (rootless virtio-net)
+  Guest IP Address:    192.168.127.2
+  Virtual Gateway:     192.168.127.1
+  Virtual MAC:         5a:94:ef:e4:0c:ee
+  Interface MTU:       1500
+  Guest Hostname:      ai-worker
+  DNS Resolvers:       8.8.8.8, 1.1.1.1
+  Port Mappings:       0.0.0.0:8080 -> 192.168.127.2:80
+  Allowed Egress:      api.openai.com:443, *.github.com:443
+  Metadata Defense:    Active (169.254.169.254 exfiltration blocked)
+  In-Flight Secrets:   Active (Zero-Trust header/body substitution)
+  LLM Token Ceiling:   50000 tokens
+  Egress Proxy Server: 127.0.0.1:41823
+  Virtual Switch Sock: /Users/apple/.cache/krun-microvm/instances/vm-49fa81/gvproxy.sock
+```
+
+---
+
+### 3. Zero-Trust Egress Filtering & In-Flight Secret Masking
+
+Secure autonomous AI agents, multi-tenant workflows, and untrusted code from exfiltrating credentials or cloud infrastructure keys:
+
+```bash
+# Run with strict default-deny egress (only OpenAI and GitHub permitted):
+microvm run \
+    --allow-host api.openai.com:443 \
+    --allow-host "*.github.com:443" \
+    --secret OPENAI_API_KEY=env:HOST_KEY \
+    --max-tokens 50000 \
+    python:3.11-slim
+```
+
+1. **Default-Deny Egress**: All outbound connections outside the `--allow-host` whitelist are immediately dropped.
+2. **Cloud Metadata Defense**: Access to AWS/GCP/Azure instance metadata (`169.254.169.254`) is strictly blocked by default.
+3. **In-Flight Secret Substitution**: The microVM only receives an opaque placeholder token (`krun-secret:OPENAI_API_KEY`). The host egress proxy transparently replaces it on the wire with the real secret, so untrusted code can **never read the actual API key from disk or memory**.
+4. **Hard LLM Token Budget**: Outbound SSE streams and JSON payloads are inspected in real time. Connections are terminated the instant the cumulative token threshold is exceeded.
+
+---
+
+### 4. Multi-MicroVM Compose Networking & Service Discovery
+
+Services deployed with `microvm compose` automatically receive inter-service DNS discovery:
+
+```yaml
+# krun-compose.yaml
+version: "krun/v1"
+services:
+  web:
+    image: nginx:alpine
+    ports: ["8080:80"]
+    depends_on: ["api"]
+
+  api:
+    image: python:3.11-alpine
+    ports: ["5000:5000"]
+    depends_on: ["db"]
+
+  db:
+    image: postgres:16-alpine
+    ports: ["5432:5432"]
+```
+
+- **Seamless Name Resolution**: Inside `web`, requests to `http://api:5000` resolve automatically to the API service. Inside `api`, `postgres://db:5432` resolves seamlessly to the database service.
+- **Autonomous Resilient DNS Engine**: The microVM engine parses host nameservers, automatically filters broken systemd-resolved loopback stubs (`127.0.0.53` and `127.0.0.1`), and configures resilient fallback resolvers (`8.8.8.8`, `1.1.1.1`).
+- **Custom Hardware Attributes**: Set custom MAC addresses and MTUs with `--mac 5a:94:ef:e4:0c:ee` and `--mtu 9000`.
+
+---
+
+## 🍎 Asahi Linux & m1n1 Boot Integration (Apple Silicon)
+
+`libkrun-sdk` provides native support for booting **Asahi Linux kernels** (`vmlinuz-asahi`, `Image.gz`) and **m1n1 payloads** (`m1n1.bin`, `m1n1.elf`) on Apple Silicon (M1/M2/M3/M4).
+
+```
+               +-------------------------------------------------------+
+               |        Apple Silicon Host (macOS / Asahi Linux)       |
+               |             16KB Memory Page Size Host                |
+               +-------------------------------------------------------+
+                                          |
+                +-------------------------+-------------------------+
+                |                                                   |
+       [ m1n1 Bootloader ]                                  [ muvm / libkrun ]
+   Stage 1/2 Hypervisor & Hardware                      Hardware MicroVM Engine
+   Payload (--kernel-format raw)                        Sub-100ms cold boot
+                |                                                   |
+                +-------------------------+-------------------------+
+                                          |
+               +-------------------------------------------------------+
+               |                libkrun Hardware MicroVM               |
+               |              4KB Guest Memory Page Size               |
+               +-------------------------------------------------------+
+               |  • Asahi Linux Kernel: vmlinuz-asahi / Image.gz       |
+               |  • 3D Acceleration: virtio-gpu (Metal / DRM Venus)    |
+               |  • High-Throughput I/O: VirtioFS DAX Direct Mapping   |
+               |  • x86 Gaming & Emulators: FEX-Emu / Box64 / Wine     |
+               +-------------------------------------------------------+
+```
+
+### 1. Understanding m1n1 & Asahi Linux Payloads
+- **m1n1**: Developed by the Asahi Linux team, `m1n1` serves as the stage 1 and stage 2 bootloader and hypervisor on Apple Silicon. In `libkrun-sdk`, raw `m1n1.bin` payloads can be booted directly with `--kernel-format raw` (`KRUN_KERNEL_FORMAT_RAW`), making `libkrun-sdk` an ideal testbed for low-level Apple Silicon kernel development, hypervisor experimentation, and hardware tracing without risking host instability.
+- **Asahi Linux Compressed Kernels (`Image.gz` / `vmlinuz-asahi`)**: Standard Asahi Linux distribution kernels are gzip-compressed ARM64 image binaries (`0x1f, 0x8b`). `libkrun-sdk` automatically inspects the magic bytes and sets `KRUN_KERNEL_FORMAT_IMAGE_GZ`, or allows explicit control via `--kernel-format gz`.
+
+### 2. The 16KB Host vs. 4KB Guest Page Size Problem (Why `muvm` uses `libkrun`)
+Apple Silicon hardware operates at **16KB memory page sizes** under both macOS and Asahi Linux to maximize memory bandwidth and TLB hit rates. However:
+- The entire x86/x86_64 software ecosystem, including Windows applications, Steam games, and user-space binaries, is hardcoded to **4KB page sizes**.
+- Running x86 dynamic translators like **FEX-Emu**, **Box64**, and **Wine / Proton** directly on a 16KB host causes memory corruption, misaligned memory-mapped files, and frequent application crashes.
+- **The Solution**: The Asahi Linux project created **`muvm`**, which leverages **`libkrun`** to spin up lightweight Linux microVMs running a **4KB guest kernel** on top of the 16KB Apple Silicon host.
+- `libkrun-sdk` brings this exact architecture to developers and engineers with zero-config OCI containers, direct kernel loading, and virtio-gpu passthrough.
+
+### 3. Direct Boot CLI Examples
+
+```bash
+# 🍏 1. Boot compressed Asahi Linux ARM64 kernel with rootfs disk and virtio-gpu:
+microvm run \
+    --kernel /boot/vmlinuz-asahi \
+    --kernel-format gz \
+    --initrd /boot/initramfs-linux.img \
+    --disk rootfs.raw \
+    --cmdline "console=ttyAMA0 earlycon root=/dev/vda rw" \
+    --gpu --gpu-shm-size 4G \
+    -c 4 -m 4096
+
+# 🍎 2. Boot m1n1 stage 1/2 raw payload directly:
+microvm run \
+    --kernel /usr/lib/asahi-boot/m1n1.bin \
+    --kernel-format raw \
+    --cmdline "console=ttyAMA0 earlycon" \
+    -c 4 -m 2048
+
+# 🚀 3. Run 4KB-page emulation container with declarative manifest:
+microvm run -f examples/asahi-microvm.yaml -d
+```
+
+### 4. Supported Kernel Formats
+
+| Format Flag | Identifier | Description & Common Targets |
+|---|---|---|
+| `--kernel-format raw` | `KRUN_KERNEL_FORMAT_RAW` | Flat binary payload, ARM64 uncompressed `Image`, `m1n1.bin` |
+| `--kernel-format gz` | `KRUN_KERNEL_FORMAT_IMAGE_GZ` | Gzip-compressed ARM64 Linux kernel (`vmlinuz-asahi`, `Image.gz`) |
+| `--kernel-format elf` | `KRUN_KERNEL_FORMAT_ELF` | Uncompressed ELF Linux kernel (`vmlinux`), unikernels |
+| `--kernel-format zstd`| `KRUN_KERNEL_FORMAT_IMAGE_ZSTD` | Zstandard-compressed kernel image |
+| `--kernel-format bz2` | `KRUN_KERNEL_FORMAT_IMAGE_BZ2` | Bzip2-compressed kernel image |
+| `--kernel-format pe`  | `KRUN_KERNEL_FORMAT_PE_GZ` | Compressed EFI PE kernel binary |
+| *(Omitted)* | Auto-Detect | Automatic inspection of file magic bytes (`0x1f8b`, `0x28b52ffd`, `\x7fELF`) |
+
+---
+
 ## 🛠️ CLI Command Reference
 
 <details>
@@ -343,9 +566,15 @@ microvm rm -f <vm-id>
 microvm prune
 ```
 
-### Universal Multi-Boot Engines
+### Universal Multi-Boot Engines (Linux, Asahi, m1n1, UEFI & Unikernels)
 ```bash
-# Direct Linux kernel boot with initrd and cmdline:
+# Direct compressed Asahi Linux ARM64 kernel boot (auto-detect or explicit format):
+microvm run --kernel /boot/vmlinuz-asahi --kernel-format gz --initrd /boot/initrd.img --cmdline "console=ttyAMA0 earlycon" --disk rootfs.raw
+
+# Direct m1n1 stage 1/2 raw payload boot on Apple Silicon:
+microvm run --kernel /usr/lib/asahi-boot/m1n1.bin --kernel-format raw --cmdline "console=ttyAMA0 earlycon" -c 4 -m 2048
+
+# Direct standard Linux kernel boot with initrd and cmdline:
 microvm run --kernel /boot/vmlinuz --initrd /boot/initrd.img --cmdline "console=ttyS0" --disk rootfs.raw
 
 # UEFI firmware boot (EDK2 / KRUN_EFI.fd):
@@ -353,6 +582,27 @@ microvm run --firmware /usr/share/edk2/aarch64/QEMU_EFI.fd --disk os.img
 
 # Boot unikernels (Unikraft, Nanos, OSv):
 microvm unikernel app.unikraft -c 2 -m 512 --cmdline "netdev.ipv4_addr=192.168.1.2"
+```
+
+### Virtual Networking & Egress Security
+```bash
+# List all microVM virtual networks, driver modes, IPs, and port forwards:
+microvm network ls
+microvm network ls --json
+
+# Deep inspect network configuration, MAC, DNS, and firewall policies:
+microvm network inspect <vm-id>
+
+# View published port forwards across all running microVMs:
+microvm network ports
+microvm network ports <vm-id>
+
+# Run live connectivity, DNS resolution, and egress diagnostic probes:
+microvm network test <vm-id> api.openai.com
+microvm network test <vm-id> 1.1.1.1
+
+# Launch microVM with custom network mode, MAC address, and jumbo frames:
+microvm run --net gvproxy --mac 5a:94:ef:e4:0c:ee --mtu 9000 alpine:latest
 ```
 
 </details>

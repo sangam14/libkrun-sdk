@@ -76,6 +76,10 @@ pub struct ServiceSpec {
     #[serde(default, deserialize_with = "deserialize_depends_on")]
     pub depends_on: Vec<String>,
 
+    /// Virtual networks attached to this service
+    #[serde(default, deserialize_with = "deserialize_depends_on")]
+    pub networks: Vec<String>,
+
     /// Restart policy: "no", "always", "on-failure"
     #[serde(default)]
     pub restart: Option<String>,
@@ -249,6 +253,7 @@ impl Manifest {
                     working_dir: None,
                     network_mode: k8s.spec.network_mode,
                     depends_on: Vec::new(),
+                    networks: Vec::new(),
                     restart: None,
                     gpu: k8s.spec.gpu,
                     gpu_shm_size: k8s.spec.gpu_shm_size,
@@ -611,6 +616,15 @@ impl ComposeProject {
                 _ => {}
             }
         }
+
+        // Inject peer service names into /etc/hosts for seamless inter-service discovery
+        let mut extra_hosts = Vec::new();
+        for peer_name in self.spec.services.keys() {
+            if peer_name != service_name {
+                extra_hosts.push((peer_name.clone(), "127.0.0.1".to_string()));
+            }
+        }
+        builder = builder.extra_hosts(extra_hosts);
 
         Ok(builder)
     }

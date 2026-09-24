@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::IpAddr;
@@ -112,6 +112,17 @@ impl DnsConfig {
         hostname: &str,
         nameservers: &[String],
     ) -> Result<()> {
+        Self::write_network_files_with_aliases(rootfs, hostname, nameservers, &[])
+    }
+
+    /// Injects /etc/resolv.conf, /etc/hosts, and /etc/hostname into guest rootfs,
+    /// adding extra peer alias mappings (e.g. for multi-service Compose inter-VM networking).
+    pub fn write_network_files_with_aliases(
+        rootfs: &Path,
+        hostname: &str,
+        nameservers: &[String],
+        extra_hosts: &[(String, String)],
+    ) -> Result<()> {
         let etc_dir = rootfs.join("etc");
         fs::create_dir_all(&etc_dir)
             .with_context(|| format!("Failed to create {}", etc_dir.display()))?;
@@ -126,11 +137,14 @@ impl DnsConfig {
         fs::write(&resolv_path, resolv)
             .with_context(|| format!("Failed to write {}", resolv_path.display()))?;
 
-        // 2. Write /etc/hosts
-        let hosts = format!(
+        // 2. Write /etc/hosts with loopback, hostname, and peer aliases
+        let mut hosts = format!(
             "127.0.0.1 localhost {}\n::1 localhost ip6-localhost ip6-loopback\n",
             hostname
         );
+        for (alias, ip) in extra_hosts {
+            hosts.push_str(&format!("{} {}\n", ip, alias));
+        }
         let hosts_path = etc_dir.join("hosts");
         fs::write(&hosts_path, hosts)
             .with_context(|| format!("Failed to write {}", hosts_path.display()))?;
@@ -169,6 +183,204 @@ impl DnsConfig {
         Ok(())
     }
 }
+
+/// Parses a colon-separated MAC address (e.g. `5a:94:ef:e4:0c:ee`) into 6 raw bytes.
+pub fn parse_mac_address(s: &str) -> Result<[u8; 6]> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        bail!(
+            "Invalid MAC address format '{}', expected 6 hex octets separated by colons (e.g. 5a:94:ef:e4:0c:ee)",
+            s
+        );
+    }
+    let mut bytes = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        bytes[i] = u8::from_str_radix(part, 16)
+            .with_context(|| format!("Invalid hex byte '{}' in MAC address '{}'", part, s))?;
+    }
+    Ok(bytes)
+}
+
+/// Deep inspection of a microVM's virtual network stack and security boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MicroVmNetworkInspection {
+    pub id: String,
+    pub pid: Option<u32>,
+    pub status: String,
+    pub mode: String,
+    pub guest_ip: String,
+    pub gateway_ip: String,
+    pub mac_address: String,
+    pub mtu: usize,
+    pub dns_servers: Vec<String>,
+    pub hostname: String,
+    pub port_forwards: Vec<PortForward>,
+    pub allow_hosts: Vec<String>,
+    pub metadata_blocked: bool,
+    pub secret_substitution_active: bool,
+    pub token_budget: Option<u64>,
+    pub egress_proxy_port: Option<u16>,
+    pub unix_socket_path: Option<String>,
+}
+
+/// Inspects the runtime or persisted network configuration of a microVM instance.
+pub fn inspect_microvm_network(
+    instance_dir: &Path,
+    id: &str,
+    pid: Option<u32>,
+    is_running: bool,
+) -> Result<MicroVmNetworkInspection> {
+    let runner_cfg_path = instance_dir.join("runner_config.json");
+    let runner_cfg: Option<crate::types::RunnerConfig> = if runner_cfg_path.exists() {
+        std::fs::read_to_string(&runner_cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+
+    // Extract hostname and DNS from rootfs/etc/ if present
+    let mut dns_servers = Vec::new();
+    let mut hostname = id.to_string();
+
+    let etc_resolv = instance_dir.join("rootfs/etc/resolv.conf");
+    if let Ok(content) = std::fs::read_to_string(&etc_resolv) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("nameserver ") {
+                dns_servers.push(trimmed.trim_start_matches("nameserver ").trim().to_string());
+            }
+        }
+    }
+
+    let etc_hostname = instance_dir.join("rootfs/etc/hostname");
+    if let Ok(content) = std::fs::read_to_string(&etc_hostname) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            hostname = trimmed.to_string();
+        }
+    }
+
+    let status = if is_running {
+        format!("● Running (PID {})", pid.unwrap_or(0))
+    } else {
+        "○ Stopped".to_string()
+    };
+
+    if let Some(cfg) = runner_cfg {
+        if !cfg.dns_servers.is_empty() {
+            dns_servers = cfg.dns_servers.clone();
+        }
+        if let Some(ref h) = cfg.hostname {
+            hostname = h.clone();
+        }
+
+        let (mode, guest_ip, gateway_ip, mac_address, mtu, unix_sock) = if cfg.no_network {
+            (
+                "none (air-gapped)".to_string(),
+                "127.0.0.1 (isolated loopback)".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+                65536,
+                None,
+            )
+        } else if cfg.gvproxy {
+            (
+                "gvproxy (rootless virtio-net)".to_string(),
+                "192.168.127.2".to_string(),
+                "192.168.127.1".to_string(),
+                cfg.mac_address
+                    .clone()
+                    .unwrap_or_else(|| "5a:94:ef:e4:0c:ee".to_string()),
+                cfg.mtu.unwrap_or(1500),
+                cfg.net_sock_path.clone().or_else(|| {
+                    let gv = instance_dir.join("gvproxy.sock");
+                    Some(gv.to_string_lossy().to_string())
+                }),
+            )
+        } else if let Some(ref netns) = cfg.netns {
+            (
+                format!("cni (netns: {})", netns.display()),
+                "CNI Dynamically Assigned".to_string(),
+                "CNI Pod Gateway".to_string(),
+                cfg.mac_address
+                    .clone()
+                    .unwrap_or_else(|| "Dynamic (CNI)".to_string()),
+                cfg.mtu.unwrap_or(1500),
+                cfg.net_sock_path.clone(),
+            )
+        } else if let Some(ref sock) = cfg.net_sock_path {
+            (
+                "unixstream (external L2 switch)".to_string(),
+                "Switch Assigned".to_string(),
+                "Switch Gateway".to_string(),
+                cfg.mac_address
+                    .clone()
+                    .unwrap_or_else(|| "5a:94:ef:e4:0c:ee".to_string()),
+                cfg.mtu.unwrap_or(1500),
+                Some(sock.clone()),
+            )
+        } else {
+            (
+                "tsi (Transparent Socket Impersonation)".to_string(),
+                "Host-Shared / 127.0.0.1".to_string(),
+                "Host Default Gateway".to_string(),
+                "In-Process AF_VSOCK".to_string(),
+                65536,
+                None,
+            )
+        };
+
+        if dns_servers.is_empty() {
+            dns_servers = vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()];
+        }
+
+        Ok(MicroVmNetworkInspection {
+            id: id.to_string(),
+            pid,
+            status,
+            mode,
+            guest_ip,
+            gateway_ip,
+            mac_address,
+            mtu,
+            dns_servers,
+            hostname,
+            port_forwards: cfg.port_forwards,
+            allow_hosts: cfg.allow_hosts,
+            metadata_blocked: !cfg.no_network,
+            secret_substitution_active: !cfg.secrets.is_empty(),
+            token_budget: cfg.max_tokens,
+            egress_proxy_port: cfg.proxy_port,
+            unix_socket_path: unix_sock,
+        })
+    } else {
+        // Fallback when runner_config.json is absent
+        if dns_servers.is_empty() {
+            dns_servers = vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()];
+        }
+        Ok(MicroVmNetworkInspection {
+            id: id.to_string(),
+            pid,
+            status,
+            mode: "tsi (Transparent Socket Impersonation)".to_string(),
+            guest_ip: "Host-Shared / 127.0.0.1".to_string(),
+            gateway_ip: "Host Default Gateway".to_string(),
+            mac_address: "In-Process AF_VSOCK".to_string(),
+            mtu: 65536,
+            dns_servers,
+            hostname,
+            port_forwards: Vec::new(),
+            allow_hosts: Vec::new(),
+            metadata_blocked: true,
+            secret_substitution_active: false,
+            token_budget: None,
+            egress_proxy_port: None,
+            unix_socket_path: None,
+        })
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -224,5 +436,51 @@ mod tests {
             mode.unix_socket_path(),
             Some(Path::new("/run/cni-krun.sock"))
         );
+    }
+
+    #[test]
+    fn test_parse_mac_address() {
+        let mac = parse_mac_address("5a:94:ef:e4:0c:ee").unwrap();
+        assert_eq!(mac, [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee]);
+
+        let custom = parse_mac_address("00:1A:2B:3C:4D:5E").unwrap();
+        assert_eq!(custom, [0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]);
+
+        assert!(parse_mac_address("invalid").is_err());
+        assert!(parse_mac_address("5a:94:ef:e4:0c").is_err());
+        assert!(parse_mac_address("5a:94:ef:e4:0c:ee:ff").is_err());
+    }
+
+    #[test]
+    fn test_write_network_files_with_aliases() {
+        let dir = tempdir().unwrap();
+        let nameservers = vec!["8.8.8.8".to_string()];
+        let aliases = vec![
+            ("api".to_string(), "127.0.0.1".to_string()),
+            ("db".to_string(), "127.0.0.1".to_string()),
+        ];
+        DnsConfig::write_network_files_with_aliases(
+            dir.path(),
+            "web-service",
+            &nameservers,
+            &aliases,
+        )
+        .unwrap();
+
+        let hosts = fs::read_to_string(dir.path().join("etc/hosts")).unwrap();
+        assert!(hosts.contains("127.0.0.1 localhost web-service"));
+        assert!(hosts.contains("127.0.0.1 api"));
+        assert!(hosts.contains("127.0.0.1 db"));
+    }
+
+    #[test]
+    fn test_inspect_microvm_network_fallback() {
+        let dir = tempdir().unwrap();
+        let inspection = inspect_microvm_network(dir.path(), "vm-demo-123", Some(9999), true).unwrap();
+        assert_eq!(inspection.id, "vm-demo-123");
+        assert_eq!(inspection.pid, Some(9999));
+        assert!(inspection.status.contains("Running"));
+        assert!(inspection.mode.contains("tsi"));
+        assert_eq!(inspection.guest_ip, "Host-Shared / 127.0.0.1");
     }
 }

@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use microvm_core::{
-    collect_process_stats, ImageReference, MicroVmBuilder, OciArtifact, OciClient, OciLayout,
-    Preflight, StateManager, VmStatus,
+    collect_process_stats, detect_kernel_format, parse_kernel_format, ImageReference,
+    MicroVmBuilder, OciArtifact, OciClient, OciLayout, Preflight, StateManager, VmStatus,
 };
 use microvm_core::compose::{
     ComposeProject, ComposeProjectState, ComposeServiceState,
@@ -105,6 +105,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub hostname: Option<String>,
 
+    /// Custom MAC address for virtio-net interface (e.g. 5a:94:ef:e4:0c:ee)
+    #[arg(long = "mac")]
+    pub mac: Option<String>,
+
+    /// Network MTU for virtio-net interface (default: 1500)
+    #[arg(long = "mtu")]
+    pub mtu: Option<usize>,
+
     /// Guest resource limits (e.g. RLIMIT_NOFILE=1024:2048)
     #[arg(long)]
     pub rlimits: Option<String>,
@@ -153,9 +161,13 @@ pub struct RunArgs {
     #[arg(long = "max-tokens")]
     pub max_tokens: Option<u64>,
 
-    /// Direct kernel boot: path to kernel binary (ELF, RAW, bzImage)
+    /// Direct kernel boot: path to kernel binary (ELF, RAW, bzImage, Image.gz, m1n1)
     #[arg(long = "kernel")]
     pub kernel: Option<PathBuf>,
+
+    /// Direct kernel format override (raw/bin/m1n1, elf/vmlinux, gz/image.gz/vmlinuz, bz2, zstd, pe)
+    #[arg(long = "kernel-format", alias = "kformat")]
+    pub kernel_format: Option<String>,
 
     /// Direct kernel boot: optional initramfs/initrd path
     #[arg(long = "initrd")]
@@ -544,6 +556,67 @@ enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+
+    /// Manage microVM virtual networking, port mappings, and egress policies
+    #[command(subcommand)]
+    Network(NetworkCommands),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum NetworkCommands {
+    /// List active microVM network configurations, modes, and interfaces
+    #[command(name = "ls", alias = "list")]
+    Ls {
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Inspect detailed network topology, IPs, DNS, and egress rules of a microVM
+    Inspect {
+        /// ID or PID of the microVM
+        id: String,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Display active host-to-guest port forwards across microVMs
+    Ports {
+        /// Optional microVM ID (if omitted, lists port forwards for all microVMs)
+        id: Option<String>,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Test network connectivity, DNS resolution, and egress security from inside a microVM
+    Test {
+        /// ID or PID of the running microVM
+        id: String,
+
+        /// Target host or IP to test connectivity against (e.g. 1.1.1.1, api.openai.com)
+        #[arg(default_value = "1.1.1.1")]
+        target: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -705,15 +778,15 @@ enum ContainerdCommands {
     Status,
 }
 
+fn default_data_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache/krun-microvm")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-
-    let default_data_dir = || {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".cache/krun-microvm")
-    };
 
     match cli.command {
         Commands::Run(run) => {
@@ -738,6 +811,8 @@ async fn main() -> Result<()> {
                 net,
                 dns,
                 hostname,
+                mac,
+                mtu,
                 rlimits,
                 dax,
                 lazy_load,
@@ -751,6 +826,7 @@ async fn main() -> Result<()> {
                 secrets,
                 max_tokens,
                 kernel,
+                kernel_format,
                 initrd,
                 cmdline,
                 firmware,
@@ -781,7 +857,17 @@ async fn main() -> Result<()> {
                 if !detach {
                     println!("🚀 Direct kernel boot: {}", kpath.display());
                 }
-                MicroVmBuilder::new("").kernel(kpath.clone(), initrd, cmdline)
+                let format_val = if let Some(ref fmt_str) = kernel_format {
+                    parse_kernel_format(fmt_str).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Invalid kernel format '{}'. Supported formats: raw, bin, m1n1, elf, vmlinux, gz, image.gz, vmlinuz, bz2, zstd, pe",
+                            fmt_str
+                        )
+                    })?
+                } else {
+                    detect_kernel_format(kpath)
+                };
+                MicroVmBuilder::new("").kernel_with_format(kpath.clone(), format_val, initrd, cmdline)
             } else if let Some(ref fpath) = firmware {
                 if !detach {
                     println!("🚀 UEFI firmware boot: {}", fpath.display());
@@ -889,6 +975,14 @@ async fn main() -> Result<()> {
 
             if let Some(h) = hostname {
                 builder = builder.hostname(h);
+            }
+
+            if let Some(m) = mac {
+                builder = builder.mac_address(m);
+            }
+
+            if let Some(mtu_val) = mtu {
+                builder = builder.mtu(mtu_val);
             }
 
             if !cmd.is_empty() {
@@ -2250,8 +2344,284 @@ fi"#
             cherry_pick_sandbox_to_host(&cow_ws, &abs_host_ws, &host_head, &sandbox_head)?;
             println!("✅ Successfully cherry-picked sandbox commits to host workspace!");
         }
+
+        Commands::Network(net_cmd) => handle_network_command(net_cmd).await?,
     }
 
+    Ok(())
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
+    match cmd {
+        NetworkCommands::Ls { json, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vms = StateManager::list(&base)?;
+            let mut inspections = Vec::new();
+            for vm in &vms {
+                let is_alive = vm.is_process_alive();
+                if let Ok(insp) = microvm_core::net::inspect_microvm_network(
+                    &vm.instance_dir,
+                    &vm.id,
+                    Some(vm.pid),
+                    is_alive,
+                ) {
+                    inspections.push(insp);
+                }
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&inspections)?);
+            } else if inspections.is_empty() {
+                println!("No active microVM networks found.");
+            } else {
+                println!(
+                    "{:<14} {:<12} {:<16} {:<16} {:<16} {:<18} {}",
+                    "MICROVM ID", "MODE", "GUEST IP", "GATEWAY", "PORTS", "EGRESS RULES", "STATUS"
+                );
+                println!("{:-<100}", "");
+                for item in inspections {
+                    let ports_str = if item.port_forwards.is_empty() {
+                        "-".to_string()
+                    } else {
+                        item.port_forwards
+                            .iter()
+                            .map(|p| format!("{}:{}", p.host, p.guest))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    let egress_str = if item.allow_hosts.is_empty() {
+                        if item.mode.starts_with("none") {
+                            "Blocked (All)".to_string()
+                        } else {
+                            "Unrestricted".to_string()
+                        }
+                    } else {
+                        item.allow_hosts.join(",")
+                    };
+                    let mode_short = if item.mode.starts_with("gvproxy") {
+                        "gvproxy"
+                    } else if item.mode.starts_with("tsi") {
+                        "tsi"
+                    } else if item.mode.starts_with("none") {
+                        "none"
+                    } else if item.mode.starts_with("cni") {
+                        "cni"
+                    } else {
+                        "unix"
+                    };
+
+                    println!(
+                        "{:<14} {:<12} {:<16} {:<16} {:<16} {:<18} {}",
+                        truncate_str(&item.id, 13),
+                        mode_short,
+                        truncate_str(&item.guest_ip, 15),
+                        truncate_str(&item.gateway_ip, 15),
+                        truncate_str(&ports_str, 15),
+                        truncate_str(&egress_str, 17),
+                        item.status
+                    );
+                }
+            }
+        }
+
+        NetworkCommands::Inspect { id, json, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vm = match StateManager::find(&base, &id)? {
+                Some(v) => v,
+                None => bail!("MicroVM '{}' not found in state", id),
+            };
+            let is_alive = vm.is_process_alive();
+            let inspection = microvm_core::net::inspect_microvm_network(
+                &vm.instance_dir,
+                &vm.id,
+                Some(vm.pid),
+                is_alive,
+            )?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                println!("🌐 MicroVM Network Topology & Security: {}", inspection.id);
+                println!("{:-<65}", "");
+                println!("  Status:              {}", inspection.status);
+                println!("  Network Mode:        {}", inspection.mode);
+                println!("  Guest IP Address:    {}", inspection.guest_ip);
+                println!("  Virtual Gateway:     {}", inspection.gateway_ip);
+                println!("  Virtual MAC:         {}", inspection.mac_address);
+                println!("  Interface MTU:       {}", inspection.mtu);
+                println!("  Guest Hostname:      {}", inspection.hostname);
+                println!("  DNS Resolvers:       {}", inspection.dns_servers.join(", "));
+                let pf_str = if inspection.port_forwards.is_empty() {
+                    "None".to_string()
+                } else {
+                    inspection
+                        .port_forwards
+                        .iter()
+                        .map(|pf| {
+                            format!(
+                                "0.0.0.0:{} -> {}:{}",
+                                pf.host, inspection.guest_ip, pf.guest
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                println!("  Port Mappings:       {}", pf_str);
+                let egress_str = if inspection.allow_hosts.is_empty() {
+                    if inspection.mode.starts_with("none") {
+                        "Default-Deny (Air-Gapped Isolation)"
+                    } else {
+                        "Unrestricted (Standard Egress)"
+                    }
+                } else {
+                    &inspection.allow_hosts.join(", ")
+                };
+                println!("  Allowed Egress:      {}", egress_str);
+                println!(
+                    "  Metadata Defense:    {}",
+                    if inspection.metadata_blocked {
+                        "Active (169.254.169.254 exfiltration blocked)"
+                    } else {
+                        "Disabled"
+                    }
+                );
+                println!(
+                    "  In-Flight Secrets:   {}",
+                    if inspection.secret_substitution_active {
+                        "Active (Zero-Trust header/body substitution)"
+                    } else {
+                        "None configured"
+                    }
+                );
+                if let Some(budget) = inspection.token_budget {
+                    println!("  LLM Token Ceiling:   {} tokens", budget);
+                }
+                if let Some(port) = inspection.egress_proxy_port {
+                    println!("  Egress Proxy Server: 127.0.0.1:{}", port);
+                }
+                if let Some(ref sock) = inspection.unix_socket_path {
+                    println!("  Virtual Switch Sock: {}", sock);
+                }
+            }
+        }
+
+        NetworkCommands::Ports { id, json, data_dir } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vms = if let Some(target_id) = id {
+                match StateManager::find(&base, &target_id)? {
+                    Some(v) => vec![v],
+                    None => bail!("MicroVM '{}' not found in state", target_id),
+                }
+            } else {
+                StateManager::list(&base)?
+            };
+
+            #[derive(serde::Serialize)]
+            struct PortEntry {
+                host_port: u16,
+                guest_port: u16,
+                protocol: &'static str,
+                microvm_id: String,
+                status: String,
+                endpoint: String,
+            }
+
+            let mut port_list = Vec::new();
+            for vm in &vms {
+                let is_alive = vm.is_process_alive();
+                let status_str = if is_alive { "Running" } else { "Stopped" };
+                for pf in &vm.port_forwards {
+                    port_list.push(PortEntry {
+                        host_port: pf.host,
+                        guest_port: pf.guest,
+                        protocol: "tcp",
+                        microvm_id: vm.id.clone(),
+                        status: status_str.to_string(),
+                        endpoint: format!("http://localhost:{}", pf.host),
+                    });
+                }
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&port_list)?);
+            } else if port_list.is_empty() {
+                println!("No published port mappings found.");
+            } else {
+                println!(
+                    "{:<12} {:<12} {:<10} {:<16} {:<12} {}",
+                    "HOST PORT", "GUEST PORT", "PROTOCOL", "MICROVM ID", "STATUS", "LOCAL ENDPOINT"
+                );
+                println!("{:-<80}", "");
+                for p in port_list {
+                    println!(
+                        "{:<12} {:<12} {:<10} {:<16} {:<12} {}",
+                        p.host_port,
+                        p.guest_port,
+                        p.protocol,
+                        truncate_str(&p.microvm_id, 15),
+                        p.status,
+                        p.endpoint
+                    );
+                }
+            }
+        }
+
+        NetworkCommands::Test {
+            id,
+            target,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let vm = match StateManager::find(&base, &id)? {
+                Some(v) => v,
+                None => bail!("MicroVM '{}' not found in state", id),
+            };
+
+            if !vm.is_process_alive() {
+                bail!(
+                    "Cannot test network on stopped microVM '{}'. Start the microVM first.",
+                    id
+                );
+            }
+
+            println!(
+                "🔍 Probing network connectivity and egress security inside microVM '{}'...",
+                id
+            );
+            println!("   Target Destination: {}", target);
+
+            let test_cmd = format!(
+                "echo '[DNS Test]' && (getent hosts {target} 2>&1 || nslookup {target} 2>&1 || echo 'DNS resolution not available') && echo '[Ping/TCP Probe]' && (ping -c 2 -W 2 {target} 2>&1 || nc -z -w 2 {target} 80 2>&1 || curl -I -s --connect-timeout 2 {target} 2>&1 || echo 'Target unreachable or filtered')"
+            );
+
+            let req = microvm_core::ExecRequest::new(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                test_cmd,
+            ]);
+            let resp = StateManager::exec(&base, &id, &req).await?;
+
+            if !resp.stdout.is_empty() {
+                println!("\n{}", resp.stdout.trim());
+            }
+            if !resp.stderr.is_empty() {
+                eprintln!("\nDiagnostics Stderr:\n{}", resp.stderr.trim());
+            }
+            if resp.exit_code == 0 {
+                println!("\n✅ Network diagnostic probe completed successfully.");
+            } else {
+                println!("\n⚠️ Network diagnostic returned exit code {}.", resp.exit_code);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3402,6 +3772,8 @@ mod tests {
             "run",
             "--kernel",
             "/boot/vmlinuz",
+            "--kernel-format",
+            "gz",
             "--initrd",
             "/boot/initrd.img",
             "--cmdline",
@@ -3415,12 +3787,36 @@ mod tests {
         match cli.command {
             Commands::Run(run) => {
                 assert_eq!(run.kernel, Some(PathBuf::from("/boot/vmlinuz")));
+                assert_eq!(run.kernel_format, Some("gz".to_string()));
                 assert_eq!(run.initrd, Some(PathBuf::from("/boot/initrd.img")));
                 assert_eq!(run.cmdline, Some("console=ttyS0 root=/dev/vda".to_string()));
                 assert_eq!(
                     run.disks,
                     vec!["rootfs.raw".to_string(), "data:data.raw:ro".to_string()]
                 );
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_asahi_m1n1_kernel_run() {
+        let args = vec![
+            "microvm",
+            "run",
+            "--kernel",
+            "/opt/asahi/m1n1.bin",
+            "--kformat",
+            "raw",
+            "--cmdline",
+            "console=ttyAMA0 earlycon",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Run(run) => {
+                assert_eq!(run.kernel, Some(PathBuf::from("/opt/asahi/m1n1.bin")));
+                assert_eq!(run.kernel_format, Some("raw".to_string()));
+                assert_eq!(run.cmdline, Some("console=ttyAMA0 earlycon".to_string()));
             }
             _ => panic!("Expected Commands::Run"),
         }
@@ -3706,5 +4102,77 @@ mod tests {
             }
             _ => panic!("Expected Commands::CherryPick"),
         }
+    }
+
+    #[test]
+    fn test_cli_parse_run_mac_and_mtu() {
+        let args = vec![
+            "microvm",
+            "run",
+            "--mac",
+            "5a:94:ef:e4:0c:ee",
+            "--mtu",
+            "9000",
+            "alpine:latest",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Run(run) => {
+                assert_eq!(run.mac, Some("5a:94:ef:e4:0c:ee".to_string()));
+                assert_eq!(run.mtu, Some(9000));
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_network_commands() {
+        // network ls
+        let cli = Cli::try_parse_from(vec!["microvm", "network", "ls", "--json"]).unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Ls { json, .. }) => assert!(json),
+            _ => panic!("Expected NetworkCommands::Ls"),
+        }
+
+        // network inspect
+        let cli =
+            Cli::try_parse_from(vec!["microvm", "network", "inspect", "vm-net-123"]).unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Inspect { id, json, .. }) => {
+                assert_eq!(id, "vm-net-123");
+                assert!(!json);
+            }
+            _ => panic!("Expected NetworkCommands::Inspect"),
+        }
+
+        // network ports
+        let cli = Cli::try_parse_from(vec!["microvm", "network", "ports"]).unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Ports { id, .. }) => assert!(id.is_none()),
+            _ => panic!("Expected NetworkCommands::Ports"),
+        }
+
+        // network test
+        let cli = Cli::try_parse_from(vec![
+            "microvm",
+            "network",
+            "test",
+            "vm-net-123",
+            "api.openai.com",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Test { id, target, .. }) => {
+                assert_eq!(id, "vm-net-123");
+                assert_eq!(target, "api.openai.com");
+            }
+            _ => panic!("Expected NetworkCommands::Test"),
+        }
+    }
+
+    #[test]
+    fn test_truncate_str() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("superlongstringexample", 8), "super...");
     }
 }

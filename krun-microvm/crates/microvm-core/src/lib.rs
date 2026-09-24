@@ -37,4 +37,4 @@ pub use types::{
     BootPayload, DiskAttachment, FirmwarePayload, KernelPayload, PortForward, RunnerConfig,
     VirtioFsMount, VsockPort,
 };
-pub use vm::{MicroVm, MicroVmBuilder};
+pub use vm::{detect_kernel_format, parse_kernel_format, MicroVm, MicroVmBuilder};

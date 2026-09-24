@@ -27,3 +27,8 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Local payloads and third-party bootloaders
+m1n1/
+asahi-*/
+payloads/

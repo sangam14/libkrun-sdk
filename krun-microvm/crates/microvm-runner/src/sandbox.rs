@@ -202,6 +202,10 @@ mod tests {
             secrets: vec![],
             max_tokens: None,
             proxy_port: None,
+            mac_address: None,
+            mtu: None,
+            dns_servers: vec![],
+            hostname: None,
             supervisor_sock_path: None,
         };
 
@@ -239,6 +243,10 @@ mod tests {
             secrets: vec![],
             max_tokens: None,
             proxy_port: None,
+            mac_address: None,
+            mtu: None,
+            dns_servers: vec![],
+            hostname: None,
             supervisor_sock_path: None,
         };
 

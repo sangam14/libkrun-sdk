@@ -343,11 +343,20 @@ impl KrunContext {
         socket_path: Option<&str>,
         fd: Option<i32>,
     ) -> Result<(), KrunError> {
+        self.add_net_unixstream_with_mac(socket_path, fd, None)
+    }
+
+    pub fn add_net_unixstream_with_mac(
+        &mut self,
+        socket_path: Option<&str>,
+        fd: Option<i32>,
+        mac: Option<[u8; 6]>,
+    ) -> Result<(), KrunError> {
         let c_path = socket_path.map(CString::new).transpose()?;
         let p_path = c_path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
         let raw_fd = fd.unwrap_or(-1);
 
-        let mut mac: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
+        let mut mac: [u8; 6] = mac.unwrap_or([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee]);
         let rc = unsafe {
             ffi::krun_add_net_unixstream(
                 self.ctx_id,

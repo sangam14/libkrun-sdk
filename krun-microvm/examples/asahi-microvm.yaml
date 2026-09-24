@@ -1,0 +1,74 @@
+# Asahi Linux & Apple Silicon MicroVM Manifest
+# Demonstrates running an Asahi Linux kernel payload or 4KB page size microVM
+# on Apple Silicon (M1/M2/M3/M4) with hardware GPU acceleration (virtio-gpu/Metal).
+#
+# Direct Kernel Boot CLI Examples:
+#   # 1. Boot compressed Asahi Linux ARM64 kernel (Image.gz / vmlinuz-asahi):
+#   microvm run \
+#     --kernel /boot/vmlinuz-asahi \
+#     --kernel-format gz \
+#     --initrd /boot/initramfs-linux.img \
+#     --disk rootfs.raw \
+#     --cmdline "console=ttyAMA0 earlycon root=/dev/vda rw" \
+#     --gpu --gpu-shm-size 4G -c 4 -m 4096
+#
+#   # 2. Boot m1n1 stage 1/2 raw payload directly:
+#   microvm run \
+#     --kernel /usr/lib/asahi-boot/m1n1.bin \
+#     --kernel-format raw \
+#     --cmdline "console=ttyAMA0 earlycon" \
+#     -c 4 -m 2048
+#
+# Declarative Manifest Execution:
+#   microvm apply -f examples/asahi-microvm.yaml
+#   microvm run -f examples/asahi-microvm.yaml -d
+
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: asahi-game-box
+  labels:
+    os: asahi-linux
+    arch: aarch64
+    workload: x86-emu-gaming
+spec:
+  # Base rootfs container running with 4KB guest pages on top of 16KB Apple Silicon host
+  image: fedora-asahi-remix:latest
+  vcpus: 4
+  memory: 4096M
+
+  # GPU Acceleration via virtio-gpu (Metal on macOS / DRM Venus on Asahi Linux)
+  gpu: true
+  gpuShmSize: 4Gi
+
+  # High-throughput VirtioFS DAX memory-mapped window
+  daxWindowSize: 4Gi
+
+  # Networking configuration
+  networkMode: tsi
+  port: 2222
+
+  # Sandboxed host workspace mount
+  workspaceCow: "./games:/opt/games"
+  sandbox: true
+
+  # Allow network egress to package repositories and game servers
+  allowEgress:
+    - "*.fedoraproject.org:443"
+    - "*.archlinux.org:443"
+    - "steampowered.com:443"
+    - "*.steampowered.com:443"
+    - "*.steamstatic.com:443"
+
+  env:
+    - name: LIBGL_ALWAYS_SOFTWARE
+      value: "0"
+    - name: MESA_VK_DEVICE_SELECT
+      value: "virtio"
+    - name: FEX_PAGE_SIZE
+      value: "4096"
+
+  cmd:
+    - "/bin/bash"
+    - "-c"
+    - "echo '🍎 Asahi Linux MicroVM initialized with 4KB page emulation & virtio-gpu!' && uname -a && sleep infinity"

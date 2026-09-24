@@ -69,6 +69,9 @@ pub struct MicroVmBuilder {
     max_tokens: Option<u64>,
     boot_payload: Option<crate::types::BootPayload>,
     disks: Vec<crate::types::DiskAttachment>,
+    mac_address: Option<String>,
+    mtu: Option<usize>,
+    extra_hosts: Vec<(String, String)>,
 }
 
 impl MicroVmBuilder {
@@ -113,6 +116,9 @@ impl MicroVmBuilder {
             max_tokens: None,
             boot_payload: None,
             disks: Vec::new(),
+            mac_address: None,
+            mtu: None,
+            extra_hosts: Vec::new(),
         }
     }
 
@@ -522,23 +528,55 @@ impl MicroVmBuilder {
         self
     }
 
+    /// Sets a custom MAC address for the guest virtio-net interface (e.g. 5a:94:ef:e4:0c:ee).
+    pub fn mac_address(mut self, mac: impl Into<String>) -> Self {
+        self.mac_address = Some(mac.into());
+        self
+    }
+
+    /// Sets the MTU for the guest virtual network interface (default: 1500).
+    pub fn mtu(mut self, mtu: usize) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Adds extra hostname-to-IP alias mappings to `/etc/hosts` inside guest (e.g. for Compose inter-service communication).
+    pub fn extra_hosts(mut self, hosts: Vec<(String, String)>) -> Self {
+        self.extra_hosts.extend(hosts);
+        self
+    }
+
     /// Sets explicit multi-boot payload configuration.
     pub fn boot_payload(mut self, payload: crate::types::BootPayload) -> Self {
         self.boot_payload = Some(payload);
         self
     }
 
-    /// Configures direct kernel boot (e.g. Linux direct bzImage/ELF, NetBSD, FreeBSD Firecracker kernel).
+    /// Configures direct kernel boot (e.g. Linux direct bzImage/ELF, NetBSD, FreeBSD, Asahi Linux kernel).
+    /// Format is automatically detected from file magic if not specified.
     pub fn kernel(
+        self,
+        kernel_path: impl Into<PathBuf>,
+        initramfs: Option<PathBuf>,
+        cmdline: Option<String>,
+    ) -> Self {
+        let p = kernel_path.into();
+        let fmt = detect_kernel_format(&p);
+        self.kernel_with_format(p, fmt, initramfs, cmdline)
+    }
+
+    /// Configures direct kernel boot with an explicit kernel format (e.g. KRUN_KERNEL_FORMAT_RAW for m1n1 or KRUN_KERNEL_FORMAT_IMAGE_GZ for Asahi Linux Image.gz).
+    pub fn kernel_with_format(
         mut self,
         kernel_path: impl Into<PathBuf>,
+        kernel_format: u32,
         initramfs: Option<PathBuf>,
         cmdline: Option<String>,
     ) -> Self {
         self.boot_payload = Some(crate::types::BootPayload::Kernel(
             crate::types::KernelPayload {
                 kernel_path: kernel_path.into(),
-                kernel_format: krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF,
+                kernel_format,
                 initramfs,
                 cmdline,
             },
@@ -835,14 +873,20 @@ exec "$@"
                 guest_hostname,
                 nameservers
             );
-            crate::net::DnsConfig::write_network_files(
+            crate::net::DnsConfig::write_network_files_with_aliases(
                 &instance_rootfs,
                 &guest_hostname,
                 &nameservers,
+                &self.extra_hosts,
             )?;
         } else {
             // In air-gapped mode, write loopback only
-            crate::net::DnsConfig::write_network_files(&instance_rootfs, &guest_hostname, &[])?;
+            crate::net::DnsConfig::write_network_files_with_aliases(
+                &instance_rootfs,
+                &guest_hostname,
+                &[],
+                &[],
+            )?;
         }
 
         // 5e. Start host egress proxy server if filtering, secrets, or token budget are specified
@@ -874,12 +918,43 @@ exec "$@"
             self.net_sock_path.clone()
         };
 
+        // Transparently prepare AArch64 raw kernel payloads (like m1n1.bin)
+        // macOS libkrun on Apple Silicon loads kernels via PeGz format decompressed at 0x8000_0000
+        let mut final_boot_payload = self.boot_payload.clone();
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if let Some(crate::types::BootPayload::Kernel(ref mut k)) = final_boot_payload {
+            let is_gz = if let Ok(mut f) = std::fs::File::open(&k.kernel_path) {
+                use std::io::Read;
+                let mut magic = [0u8; 2];
+                f.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b]
+            } else {
+                false
+            };
+
+            if !is_gz {
+                let compressed_path = instance_dir.join("kernel_payload.gz");
+                if let Ok(mut src) = std::fs::File::open(&k.kernel_path) {
+                    if let Ok(dst) = std::fs::File::create(&compressed_path) {
+                        use flate2::write::GzEncoder;
+                        use flate2::Compression;
+                        let mut enc = GzEncoder::new(dst, Compression::fast());
+                        if std::io::copy(&mut src, &mut enc).is_ok() && enc.finish().is_ok() {
+                            k.kernel_path = compressed_path;
+                            k.kernel_format = krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ;
+                        }
+                    }
+                }
+            } else {
+                k.kernel_format = krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ;
+            }
+        }
+
         // 6. Spawn runner subprocess
         let runner_cfg = RunnerConfig {
             root_path: instance_rootfs,
             num_vcpus: self.vcpus,
             ram_mib: self.ram_mib,
-            boot_payload: self.boot_payload.clone(),
+            boot_payload: final_boot_payload,
             disks: self.disks.clone(),
             port_forwards: self.port_forwards.clone(),
             net_sock_path: final_net_sock_path,
@@ -904,6 +979,10 @@ exec "$@"
             secrets: self.secrets.clone(),
             max_tokens: self.max_tokens,
             proxy_port,
+            mac_address: self.mac_address.clone(),
+            mtu: self.mtu,
+            dns_servers: self.dns_servers.clone(),
+            hostname: Some(guest_hostname),
             supervisor_sock_path: Some(instance_dir.join("supervisor.sock")),
         };
 
@@ -993,7 +1072,40 @@ exec "$@"
                 }
             }
             if let Ok(Some(status)) = child.try_wait() {
-                bail!("microvm-runner exited prematurely with status: {status}");
+                if status.success() {
+                    let pid = child.id().unwrap_or(0);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    let vm_state = crate::state::VmState {
+                        id: instance_id.clone(),
+                        pid,
+                        image: self.image.clone(),
+                        created_at: now,
+                        port_forwards: self.port_forwards.clone(),
+                        instance_dir: instance_dir.clone(),
+                        status: crate::state::VmStatus::Stopped,
+                        vcpus: Some(self.vcpus),
+                        memory_mib: Some(self.ram_mib),
+                    };
+                    let _ = crate::state::StateManager::save(&data_dir, &vm_state);
+
+                    return Ok(MicroVm {
+                        id: instance_id,
+                        child,
+                        instance_dir,
+                        data_dir,
+                        is_detached: self.detach,
+                        supervisor_sock,
+                        _raw_guard: raw_guard,
+                        _proxy: egress_proxy,
+                        _gvproxy: None,
+                    });
+                } else {
+                    bail!("microvm-runner exited with error status: {status}");
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1384,6 +1496,100 @@ fn ensure_runner_signed(_runner_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Parses a string representation of a kernel payload format (raw, elf, gz, bz2, zstd, pe).
+pub fn parse_kernel_format(s: &str) -> Option<u32> {
+    match s.trim().to_lowercase().as_str() {
+        "raw" | "bin" | "m1n1" => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ)
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_RAW)
+            }
+        }
+        "elf" | "vmlinux" => Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF),
+        "gz" | "gzip" | "image.gz" | "vmlinuz" => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ)
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_GZ)
+            }
+        }
+        "pe" | "pe_gz" => Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ),
+        "bz2" | "bzip2" => Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_BZ2),
+        "zstd" | "zst" => Some(krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_ZSTD),
+        _ => None,
+    }
+}
+
+/// Automatically inspects binary magic bytes and file extension to determine the kernel format.
+/// Supports Asahi Linux gzip kernels (Image.gz / vmlinuz-asahi) and m1n1 raw payloads.
+pub fn detect_kernel_format(path: &Path) -> u32 {
+    if let Ok(mut file) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut magic = [0u8; 4];
+        if file.read_exact(&mut magic).is_ok() {
+            // Gzip magic (0x1f, 0x8b) - standard compressed kernel Image.gz / vmlinuz-asahi
+            if magic[0] == 0x1f && magic[1] == 0x8b {
+                #[cfg(target_arch = "aarch64")]
+                return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ;
+                #[cfg(not(target_arch = "aarch64"))]
+                return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_GZ;
+            }
+            // Zstandard magic (0x28, 0xb5, 0x2f, 0xfd)
+            if magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd {
+                return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_ZSTD;
+            }
+            // Bzip2 magic ("BZ")
+            if magic[0] == b'B' && magic[1] == b'Z' {
+                return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_BZ2;
+            }
+            // Standard ELF header
+            if magic[0] == 0x7f && magic[1] == b'E' && magic[2] == b'L' && magic[3] == b'F' {
+                return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF;
+            }
+        }
+    }
+
+    // Filename extension inspection fallback
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_lowercase();
+        if lower.ends_with(".gz") || lower.contains("vmlinuz") {
+            #[cfg(target_arch = "aarch64")]
+            return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ;
+            #[cfg(not(target_arch = "aarch64"))]
+            return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_GZ;
+        }
+        if lower.ends_with(".zst") || lower.ends_with(".zstd") {
+            return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_ZSTD;
+        }
+        if lower.ends_with(".bz2") {
+            return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_IMAGE_BZ2;
+        }
+        if lower.ends_with(".bin") || lower.contains("m1n1") || lower.ends_with(".raw") {
+            #[cfg(target_arch = "aarch64")]
+            return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ;
+            #[cfg(not(target_arch = "aarch64"))]
+            return krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_RAW;
+        }
+    }
+
+    // Architecture-dependent default (AArch64 defaults to PE_GZ for flat arm64 Image / m1n1 payloads)
+    #[cfg(target_arch = "aarch64")]
+    {
+        krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_ELF
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1580,5 +1786,81 @@ mod tests {
         }
 
         assert_eq!(ids.lock().unwrap().len(), 50);
+    }
+
+    #[test]
+    fn test_parse_kernel_format() {
+        use krun_sys::kernel_formats::*;
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(parse_kernel_format("raw"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+            assert_eq!(parse_kernel_format("m1n1"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+            assert_eq!(parse_kernel_format("bin"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+            assert_eq!(parse_kernel_format("gz"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+            assert_eq!(parse_kernel_format("image.gz"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+            assert_eq!(parse_kernel_format("vmlinuz"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            assert_eq!(parse_kernel_format("raw"), Some(KRUN_KERNEL_FORMAT_RAW));
+            assert_eq!(parse_kernel_format("m1n1"), Some(KRUN_KERNEL_FORMAT_RAW));
+            assert_eq!(parse_kernel_format("bin"), Some(KRUN_KERNEL_FORMAT_RAW));
+            assert_eq!(parse_kernel_format("gz"), Some(KRUN_KERNEL_FORMAT_IMAGE_GZ));
+            assert_eq!(parse_kernel_format("image.gz"), Some(KRUN_KERNEL_FORMAT_IMAGE_GZ));
+            assert_eq!(parse_kernel_format("vmlinuz"), Some(KRUN_KERNEL_FORMAT_IMAGE_GZ));
+        }
+        assert_eq!(parse_kernel_format("elf"), Some(KRUN_KERNEL_FORMAT_ELF));
+        assert_eq!(parse_kernel_format("vmlinux"), Some(KRUN_KERNEL_FORMAT_ELF));
+        assert_eq!(parse_kernel_format("bz2"), Some(KRUN_KERNEL_FORMAT_IMAGE_BZ2));
+        assert_eq!(parse_kernel_format("zstd"), Some(KRUN_KERNEL_FORMAT_IMAGE_ZSTD));
+        assert_eq!(parse_kernel_format("pe"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+        assert_eq!(parse_kernel_format("unknown_format"), None);
+    }
+
+    #[test]
+    fn test_detect_kernel_format_from_magic_and_extension() {
+        use krun_sys::kernel_formats::*;
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+
+        // 1. Gzip magic (Asahi Linux Image.gz / vmlinuz-asahi)
+        let gz_path = dir.path().join("kernel-asahi");
+        let mut gz_file = std::fs::File::create(&gz_path).unwrap();
+        gz_file.write_all(&[0x1f, 0x8b, 0x08, 0x00]).unwrap();
+        drop(gz_file);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(detect_kernel_format(&gz_path), KRUN_KERNEL_FORMAT_PE_GZ);
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(detect_kernel_format(&gz_path), KRUN_KERNEL_FORMAT_IMAGE_GZ);
+
+        // 2. ELF magic
+        let elf_path = dir.path().join("kernel-elf");
+        let mut elf_file = std::fs::File::create(&elf_path).unwrap();
+        elf_file.write_all(&[0x7f, b'E', b'L', b'F']).unwrap();
+        drop(elf_file);
+        assert_eq!(detect_kernel_format(&elf_path), KRUN_KERNEL_FORMAT_ELF);
+
+        // 3. Zstd magic
+        let zstd_path = dir.path().join("kernel-zstd");
+        let mut zstd_file = std::fs::File::create(&zstd_path).unwrap();
+        zstd_file.write_all(&[0x28, 0xb5, 0x2f, 0xfd]).unwrap();
+        drop(zstd_file);
+        assert_eq!(detect_kernel_format(&zstd_path), KRUN_KERNEL_FORMAT_IMAGE_ZSTD);
+
+        // 4. Filename extension fallback for m1n1.bin
+        let m1n1_path = dir.path().join("m1n1.bin");
+        std::fs::File::create(&m1n1_path).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(detect_kernel_format(&m1n1_path), KRUN_KERNEL_FORMAT_PE_GZ);
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(detect_kernel_format(&m1n1_path), KRUN_KERNEL_FORMAT_RAW);
+
+        // 5. Filename extension fallback for vmlinuz
+        let vmlinuz_path = dir.path().join("vmlinuz-6.8.0-asahi");
+        std::fs::File::create(&vmlinuz_path).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(detect_kernel_format(&vmlinuz_path), KRUN_KERNEL_FORMAT_PE_GZ);
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(detect_kernel_format(&vmlinuz_path), KRUN_KERNEL_FORMAT_IMAGE_GZ);
     }
 }
