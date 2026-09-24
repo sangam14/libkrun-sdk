@@ -175,7 +175,7 @@ if [ "$SKIP_DEPS" = false ]; then
 
         # Check libkrun & libkrunfw
         LIBKRUN_FOUND=false
-        if [ -f "/opt/homebrew/lib/libkrun.dylib" ] || [ -f "/usr/local/lib/libkrun.dylib" ] || brew list libkrun &>/dev/null; then
+        if [ -f "/opt/homebrew/lib/libkrun.dylib" ] || [ -f "/usr/local/lib/libkrun.dylib" ] || brew list libkrun &>/dev/null || (command -v pkg-config &>/dev/null && pkg-config --exists libkrun); then
             LIBKRUN_FOUND=true
         fi
 
@@ -306,7 +306,8 @@ if [ "$OS" = "Darwin" ] && [ "$DO_SIGN" = true ]; then
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_RUNNER"
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_CLI"
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_SHIM"
-        log_success "Binaries signed with com.apple.security.hypervisor entitlement."
+        codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_OPERATOR"
+        log_success "All binaries signed with com.apple.security.hypervisor entitlement."
     else
         log_warn "entitlements.plist not found at $ENTITLEMENTS_FILE; skipping codesign."
     fi

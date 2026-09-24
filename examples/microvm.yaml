@@ -1,0 +1,34 @@
+# Kubernetes MicroVm Custom Resource Definition (CRD) Manifest
+# Declarative single-microVM specification compatible with krun-operator and microvm CLI.
+#
+# Usage:
+#   microvm apply -f examples/microvm.yaml
+#   microvm run -f examples/microvm.yaml -d
+
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: alpine-agent
+  labels:
+    app: coder
+    environment: isolated
+spec:
+  image: alpine:latest
+  vcpus: 2
+  memory: 512M
+  port: 18080
+  networkMode: tsi
+  workspaceCow: "./workspace:workspace"
+  sandbox: true
+  allowEgress:
+    - "*.github.com:443"
+    - "api.openai.com:443"
+  env:
+    - name: AGENT_MODE
+      value: autonomous
+    - name: LOG_LEVEL
+      value: info
+  cmd:
+    - "/bin/sh"
+    - "-c"
+    - "echo '🚀 Hello from libkrun hardware-isolated microVM!' && uname -a && sleep 1"

@@ -4,7 +4,11 @@ use microvm_core::{
     collect_process_stats, ImageReference, MicroVmBuilder, OciArtifact, OciClient, OciLayout,
     Preflight, StateManager, VmStatus,
 };
+use microvm_core::compose::{
+    ComposeProject, ComposeProjectState, ComposeServiceState,
+};
 use serde_json::json;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -24,6 +28,10 @@ pub struct RunArgs {
     /// Path to an unpacked OCI runtime bundle (containing config.json and rootfs/)
     #[arg(long)]
     pub bundle: Option<PathBuf>,
+
+    /// Path to a declarative YAML manifest (compose or microvm spec)
+    #[arg(short = 'f', long = "file")]
+    pub file: Option<PathBuf>,
 
     /// Number of virtual CPUs
     #[arg(short = 'c', long, default_value_t = 2)]
@@ -214,6 +222,14 @@ enum Commands {
         /// Git repository URL to clone into workspace on boot
         #[arg(long = "repo")]
         repo: Option<String>,
+
+        /// Git commit or reference to cherry-pick into the workspace on launch
+        #[arg(long = "cherry-pick", alias = "pick")]
+        cherry_pick: Option<String>,
+
+        /// Automatically cherry-pick sandbox commits back to host workspace on session exit
+        #[arg(long = "apply-to-host", alias = "sync-back")]
+        apply_to_host: bool,
 
         /// Container base image
         #[arg(short = 'i', long = "image", default_value = "alpine:latest")]
@@ -493,6 +509,164 @@ enum Commands {
         #[command(subcommand)]
         command: ContainerdCommands,
     },
+
+    /// Multi-microVM orchestration using declarative compose manifests (docker-compose compatible)
+    Compose {
+        #[command(subcommand)]
+        command: ComposeCommands,
+    },
+
+    /// Apply a declarative YAML manifest (Docker Compose or Kubernetes CRD)
+    Apply {
+        /// Path to YAML manifest file (e.g. krun-compose.yaml, microvm.yaml)
+        #[arg(short = 'f', long = "file")]
+        file: PathBuf,
+
+        /// Run microVM(s) in background
+        #[arg(short = 'd', long)]
+        detach: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Cherry-pick commits from an isolated sandbox workspace back to the host git repository
+    CherryPick {
+        /// ID or PID of the sandbox microVM instance (from microvm ps -a)
+        id: String,
+
+        /// Target host workspace directory to apply commits to (defaults to current directory)
+        #[arg(short = 'w', long = "workspace", default_value = ".")]
+        workspace: PathBuf,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ComposeCommands {
+    /// Create and start microVM containers defined in compose manifest
+    Up {
+        /// Path to compose manifest file (defaults to auto-discovering krun-compose.yaml, compose.yaml, etc.)
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Run containers in background
+        #[arg(short = 'd', long)]
+        detach: bool,
+
+        /// Specific services to start (defaults to all)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Stop and remove microVM containers and networks
+    Down {
+        /// Path to compose manifest file
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Remove named volumes declared in the volumes section
+        #[arg(short = 'v', long = "volumes")]
+        volumes: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// List running microVM containers for the compose project
+    Ps {
+        /// Path to compose manifest file
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// View output logs from microVM services
+    Logs {
+        /// Path to compose manifest file
+        #[arg(long = "file")]
+        file: Option<PathBuf>,
+
+        /// Specific service name to view logs for
+        #[arg(value_name = "SERVICE")]
+        service: Option<String>,
+
+        /// Follow log output continuously
+        #[arg(short = 'f', long)]
+        follow: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Stop running microVM services without removing state
+    Stop {
+        /// Path to compose manifest file
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Specific services to stop (defaults to all)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Start stopped microVM services
+    Start {
+        /// Path to compose manifest file
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Specific services to start (defaults to all)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Restart microVM services
+    Restart {
+        /// Path to compose manifest file
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Specific services to restart (defaults to all)
+        #[arg(value_name = "SERVICE")]
+        services: Vec<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Validate and view the resolved compose configuration
+    Config {
+        /// Path to compose manifest file
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -582,7 +756,22 @@ async fn main() -> Result<()> {
                 firmware,
                 disks,
                 cmd,
+                file,
             } = *run;
+
+            if let Some(ref manifest_path) = file {
+                let base_data_dir = data_dir.clone().unwrap_or_else(default_data_dir);
+                let project = ComposeProject::load(manifest_path, Some(base_data_dir.clone()))?;
+                return handle_compose_up(
+                    &project,
+                    manifest_path,
+                    &base_data_dir,
+                    detach,
+                    &Vec::new(),
+                )
+                .await;
+            }
+
             let mut builder = if let Some(ref b) = bundle {
                 if !detach {
                     println!("📦 Loading MicroVM from OCI bundle: {}", b.display());
@@ -830,6 +1019,8 @@ async fn main() -> Result<()> {
             agent,
             workspace,
             repo,
+            cherry_pick,
+            apply_to_host,
             image,
             cpus,
             memory,
@@ -852,9 +1043,36 @@ async fn main() -> Result<()> {
                 .workspace_cow(&abs_ws, "workspace")
                 .workdir("/workspace");
 
-            if let Some(dd) = data_dir {
-                builder = builder.data_dir(dd);
+            if let Some(ref dd) = data_dir {
+                builder = builder.data_dir(dd.clone());
             }
+
+            // Inject host git credentials so git operations (cherry-pick, commit) succeed
+            let host_git_name = std::process::Command::new("git")
+                .args(["config", "user.name"])
+                .current_dir(&abs_ws)
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Sandbox Developer".to_string());
+
+            let host_git_email = std::process::Command::new("git")
+                .args(["config", "user.email"])
+                .current_dir(&abs_ws)
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "developer@libkrun.local".to_string());
+
+            builder = builder
+                .env("GIT_AUTHOR_NAME", &host_git_name)
+                .env("GIT_AUTHOR_EMAIL", &host_git_email)
+                .env("GIT_COMMITTER_NAME", &host_git_name)
+                .env("GIT_COMMITTER_EMAIL", &host_git_email);
 
             // Inject any explicit secrets passed via --secret
             for s in &secrets {
@@ -906,21 +1124,93 @@ async fn main() -> Result<()> {
                 }
             }
 
-            if let Some(git_repo) = repo {
-                let clone_script = format!(
-                    "if [ ! -d .git ]; then git clone {} .; fi; exec /bin/sh",
-                    git_repo
-                );
-                builder = builder.cmd(vec!["/bin/sh".to_string(), "-c".to_string(), clone_script]);
-            } else if !cmd.is_empty() {
-                builder = builder.cmd(cmd);
-            } else {
-                builder = builder.cmd(vec!["/bin/sh".to_string()]);
+            let mut script_parts = Vec::new();
+            script_parts.push(
+                r#"if command -v git >/dev/null 2>&1; then
+    git config --global --add safe.directory '*' 2>/dev/null || true
+    [ -n "$GIT_AUTHOR_NAME" ] && git config --global user.name "$GIT_AUTHOR_NAME" 2>/dev/null || true
+    [ -n "$GIT_AUTHOR_EMAIL" ] && git config --global user.email "$GIT_AUTHOR_EMAIL" 2>/dev/null || true
+fi"#.to_string(),
+            );
+
+            if let Some(ref git_repo) = repo {
+                script_parts.push(format!(
+                    r#"if [ ! -d .git ]; then
+    echo "📦 Cloning {git_repo} into workspace..."
+    git clone "{git_repo}" .
+    git config --global --add safe.directory '*' 2>/dev/null || true
+fi"#
+                ));
             }
+
+            if let Some(ref cp_ref) = cherry_pick {
+                script_parts.push(format!(
+                    r#"if command -v git >/dev/null 2>&1 && [ -d .git ]; then
+    echo "🍒 Cherry-picking commit '{cp_ref}' in isolated sandbox..."
+    if git cherry-pick "{cp_ref}"; then
+        echo "✅ Successfully cherry-picked '{cp_ref}' in sandbox!"
+    else
+        echo "⚠️  git cherry-pick encountered conflicts. The sandbox is ready for inspection/resolution."
+    fi
+else
+    echo "⚠️  Cannot cherry-pick: git is not installed or workspace is not a git repository."
+fi"#
+                ));
+            }
+
+            if !cmd.is_empty() {
+                let joined_cmd = cmd
+                    .iter()
+                    .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                script_parts.push(format!("exec {joined_cmd}"));
+            } else {
+                script_parts.push("exec /bin/sh".to_string());
+            }
+
+            let startup_script = script_parts.join("\n");
+            builder = builder.cmd(vec!["/bin/sh".to_string(), "-c".to_string(), startup_script]);
 
             let mut vm = builder.run().await.context("Failed to start sandbox")?;
             let status = vm.wait().await?;
             println!("🛑 Sandbox session closed with status: {}", status);
+
+            let base_dir = data_dir.unwrap_or_else(default_data_dir);
+            let cow_ws = base_dir
+                .join("instances")
+                .join(vm.id())
+                .join("workspaces")
+                .join("workspace");
+
+            if abs_ws.join(".git").exists() && cow_ws.join(".git").exists() {
+                let host_head = get_git_head(&abs_ws);
+                let sandbox_head = get_git_head(&cow_ws);
+
+                if let (Some(ref h_head), Some(ref s_head)) = (&host_head, &sandbox_head) {
+                    if h_head != s_head {
+                        let commits = get_git_commits_between(&cow_ws, h_head, s_head);
+                        if !commits.is_empty() {
+                            println!("\n📦 Sandbox produced {} new git commit(s):", commits.len());
+                            for c in &commits {
+                                println!("   • {c}");
+                            }
+
+                            if apply_to_host {
+                                println!("🚀 Cherry-picking sandbox commit(s) to host workspace...");
+                                match cherry_pick_sandbox_to_host(&cow_ws, &abs_ws, h_head, s_head) {
+                                    Ok(_) => println!("✅ Successfully cherry-picked sandbox changes to host branch!"),
+                                    Err(e) => eprintln!("⚠️ Failed to cherry-pick to host: {e}"),
+                                }
+                            } else {
+                                println!("\n💡 Tip: To apply these commits to your host branch, run:");
+                                println!("   microvm cherry-pick {}", vm.id());
+                            }
+                        }
+                    }
+                }
+            }
+
             std::process::exit(status.code().unwrap_or(0));
         }
 
@@ -1813,8 +2103,728 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::Compose { command } => match command {
+            ComposeCommands::Up {
+                file,
+                detach,
+                services,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_up(
+                    &project,
+                    &compose_file,
+                    &base_data_dir,
+                    detach,
+                    &services,
+                )
+                .await?;
+            }
+            ComposeCommands::Down {
+                file,
+                volumes,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_down(&project, &base_data_dir, volumes)?;
+            }
+            ComposeCommands::Ps { file, data_dir } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_ps(&project, &base_data_dir)?;
+            }
+            ComposeCommands::Logs {
+                file,
+                service,
+                follow,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_logs(&project, &base_data_dir, service, follow).await?;
+            }
+            ComposeCommands::Stop {
+                file,
+                services,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_stop(&project, &base_data_dir, &services)?;
+            }
+            ComposeCommands::Start {
+                file,
+                services,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_start(&project, &base_data_dir, &services).await?;
+            }
+            ComposeCommands::Restart {
+                file,
+                services,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
+                handle_compose_restart(&project, &base_data_dir, &services).await?;
+            }
+            ComposeCommands::Config { file, data_dir } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let compose_file = resolve_compose_file(file)?;
+                let project = ComposeProject::load(&compose_file, Some(base_data_dir))?;
+                handle_compose_config(&project)?;
+            }
+        },
+
+        Commands::Apply {
+            file,
+            detach,
+            data_dir,
+        } => {
+            let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+            if !file.exists() {
+                bail!("Manifest file '{}' does not exist", file.display());
+            }
+            let project = ComposeProject::load(&file, Some(base_data_dir.clone()))?;
+            handle_compose_up(&project, &file, &base_data_dir, detach, &[]).await?;
+        }
+
+        Commands::CherryPick {
+            id,
+            workspace,
+            data_dir,
+        } => {
+            let base = data_dir.unwrap_or_else(default_data_dir);
+            let abs_host_ws = std::fs::canonicalize(&workspace).unwrap_or(workspace);
+
+            let vm = match StateManager::find(&base, &id)? {
+                Some(v) => v,
+                None => bail!("MicroVM instance '{}' not found in state", id),
+            };
+
+            let cow_ws = vm.instance_dir.join("workspaces").join("workspace");
+            if !cow_ws.exists() {
+                bail!(
+                    "No Copy-on-Write workspace found for microVM '{}' at {}",
+                    id,
+                    cow_ws.display()
+                );
+            }
+
+            let host_head = get_git_head(&abs_host_ws)
+                .context("Host workspace is not a valid git repository (no HEAD found)")?;
+            let sandbox_head = get_git_head(&cow_ws)
+                .context("Sandbox workspace is not a valid git repository")?;
+
+            if host_head == sandbox_head {
+                println!(
+                    "No new commits in sandbox '{}' compared to host HEAD ({})",
+                    id,
+                    &host_head[..8.min(host_head.len())]
+                );
+                return Ok(());
+            }
+
+            let commits = get_git_commits_between(&cow_ws, &host_head, &sandbox_head);
+            println!(
+                "🍒 Cherry-picking {} commit(s) from sandbox '{}' to host:",
+                commits.len(),
+                id
+            );
+            for c in &commits {
+                println!("   • {c}");
+            }
+
+            cherry_pick_sandbox_to_host(&cow_ws, &abs_host_ws, &host_head, &sandbox_head)?;
+            println!("✅ Successfully cherry-picked sandbox commits to host workspace!");
+        }
     }
 
+    Ok(())
+}
+
+fn resolve_compose_file(file: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(f) = file {
+        if !f.exists() {
+            bail!("Compose file '{}' does not exist", f.display());
+        }
+        Ok(f)
+    } else {
+        let cur = std::env::current_dir().context("Failed to get current working directory")?;
+        ComposeProject::discover_compose_file(&cur)
+    }
+}
+
+async fn handle_compose_up(
+    project: &ComposeProject,
+    manifest_path: &Path,
+    data_dir: &Path,
+    detach: bool,
+    services_filter: &[String],
+) -> Result<()> {
+    use std::io::Write;
+
+    let all_order = project.resolve_launch_order()?;
+    let to_launch: Vec<String> = if services_filter.is_empty() {
+        all_order
+    } else {
+        let set: std::collections::HashSet<&str> =
+            services_filter.iter().map(|s| s.as_str()).collect();
+        for s in services_filter {
+            if !project.spec.services.contains_key(s) {
+                bail!("Service '{}' not found in compose manifest", s);
+            }
+        }
+        all_order
+            .into_iter()
+            .filter(|s| set.contains(s.as_str()))
+            .collect()
+    };
+
+    println!(
+        "[+] Running {} microVM service(s) for project '{}':",
+        to_launch.len(),
+        project.name
+    );
+
+    let mut state = project
+        .load_state()?
+        .unwrap_or_else(|| ComposeProjectState {
+            name: project.name.clone(),
+            compose_file: manifest_path.to_path_buf(),
+            working_dir: project.base_dir.clone(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            services: BTreeMap::new(),
+        });
+
+    let mut active_vms: Vec<microvm_core::MicroVm> = Vec::new();
+
+    for service_name in &to_launch {
+        let svc_spec = &project.spec.services[service_name];
+
+        if let Some(prev) = state.services.get(service_name) {
+            if let Ok(Some(existing_vm)) = StateManager::find(data_dir, &prev.instance_id) {
+                if existing_vm.is_process_alive() {
+                    println!(
+                        " ✔ Service '{}' is already running (ID: {}, PID: {})",
+                        service_name,
+                        prev.instance_id,
+                        prev.pid.unwrap_or(0)
+                    );
+                    continue;
+                }
+            }
+        }
+
+        print!(
+            " ⏳ Starting service '{}' ({}) ...",
+            service_name, svc_spec.image
+        );
+        let _ = std::io::stdout().flush();
+
+        let builder = project.build_service_vm(service_name)?;
+        let vm = builder
+            .run()
+            .await
+            .with_context(|| format!("Failed to launch service '{service_name}'"))?;
+
+        println!(
+            "\r ✔ Service '{}' started  (ID: {}, PID: {:?})",
+            service_name,
+            vm.id(),
+            vm.pid()
+        );
+
+        state.services.insert(
+            service_name.clone(),
+            ComposeServiceState {
+                service_name: service_name.clone(),
+                instance_id: vm.id().to_string(),
+                pid: vm.pid(),
+                image: svc_spec.image.clone(),
+                status: "running".to_string(),
+                ports: svc_spec.ports.clone(),
+            },
+        );
+        project.save_state(&state)?;
+
+        if !detach {
+            active_vms.push(vm);
+        }
+    }
+
+    if detach {
+        println!(
+            "\n✨ Compose project '{}' started in detached mode.",
+            project.name
+        );
+        print_compose_ps_table(&state, data_dir);
+        return Ok(());
+    }
+
+    println!("\nAttaching to compose project console output (Press Ctrl+C to stop)...");
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\n⚠️ Received interrupt (Ctrl+C). Gracefully stopping compose project '{}'...", project.name);
+            for mut vm in active_vms {
+                let _ = vm.stop().await;
+            }
+            for (_, svc_state) in state.services.iter_mut() {
+                svc_state.status = "stopped".to_string();
+            }
+            let _ = project.save_state(&state);
+            println!("🛑 All microVM services stopped.");
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_compose_down(
+    project: &ComposeProject,
+    data_dir: &Path,
+    remove_volumes: bool,
+) -> Result<()> {
+    use std::io::Write;
+
+    println!(
+        "[+] Stopping and removing microVM services for project '{}':",
+        project.name
+    );
+    if let Some(state) = project.load_state()? {
+        let mut rev_services: Vec<_> = state.services.values().cloned().collect();
+        rev_services.reverse();
+        for svc in rev_services {
+            print!(
+                " ⏳ Stopping service '{}' (ID: {})...",
+                svc.service_name, svc.instance_id
+            );
+            let _ = std::io::stdout().flush();
+            let _ = StateManager::stop(data_dir, &svc.instance_id);
+            let _ = StateManager::delete(data_dir, &svc.instance_id, true);
+            println!("\r ✔ Service '{}' stopped and removed", svc.service_name);
+        }
+        let _ = project.remove_state();
+    } else {
+        println!("No active state found for project '{}'.", project.name);
+    }
+
+    if remove_volumes {
+        println!(" ✔ Volumes cleaned up");
+    }
+
+    println!("✨ Compose project '{}' is down.", project.name);
+    Ok(())
+}
+
+fn handle_compose_ps(project: &ComposeProject, data_dir: &Path) -> Result<()> {
+    let state = project.load_state()?;
+    println!("Project: {}", project.name);
+    match state {
+        Some(ref s) => print_compose_ps_table(s, data_dir),
+        None => println!(
+            "No active compose state found for project '{}'.",
+            project.name
+        ),
+    }
+    Ok(())
+}
+
+fn print_compose_ps_table(state: &ComposeProjectState, data_dir: &Path) {
+    if state.services.is_empty() {
+        println!("No services declared or running.");
+        return;
+    }
+
+    println!(
+        "{:<18} {:<18} {:<18} {:<24} {:<20}",
+        "SERVICE", "CONTAINER ID", "STATUS", "IMAGE", "PORTS"
+    );
+    println!("{:-<100}", "");
+    for (name, svc) in &state.services {
+        let is_alive = if let Ok(Some(vm)) = StateManager::find(data_dir, &svc.instance_id) {
+            vm.is_process_alive()
+        } else {
+            false
+        };
+        let status_str = if is_alive {
+            format!("Up (PID {})", svc.pid.unwrap_or(0))
+        } else {
+            "Exited".to_string()
+        };
+        let ports_str = if svc.ports.is_empty() {
+            "-".to_string()
+        } else {
+            svc.ports.join(", ")
+        };
+        let trunc_id = if svc.instance_id.len() > 14 {
+            &svc.instance_id[..14]
+        } else {
+            &svc.instance_id
+        };
+        println!(
+            "{:<18} {:<18} {:<18} {:<24} {:<20}",
+            name, trunc_id, status_str, svc.image, ports_str
+        );
+    }
+}
+
+async fn handle_compose_logs(
+    project: &ComposeProject,
+    data_dir: &Path,
+    service_filter: Option<String>,
+    follow: bool,
+) -> Result<()> {
+    use std::io::{Read, Write};
+
+    let state = match project.load_state()? {
+        Some(s) => s,
+        None => bail!(
+            "No state found for compose project '{}'. Is it running?",
+            project.name
+        ),
+    };
+
+    if let Some(target_svc) = service_filter {
+        let svc_state = state.services.get(&target_svc).with_context(|| {
+            format!(
+                "Service '{target_svc}' not found in project '{}'",
+                project.name
+            )
+        })?;
+
+        let vm = StateManager::find(data_dir, &svc_state.instance_id)?.with_context(|| {
+            format!(
+                "Instance '{}' for service '{target_svc}' not found",
+                svc_state.instance_id
+            )
+        })?;
+
+        let log_file = vm.instance_dir.join("console.log");
+        if !log_file.exists() && !follow {
+            println!("No log output for service '{}'", target_svc);
+            return Ok(());
+        }
+
+        let mut file = match std::fs::File::open(&log_file) {
+            Ok(f) => f,
+            Err(_) if follow => {
+                let start = std::time::Instant::now();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if let Ok(f) = std::fs::File::open(&log_file) {
+                        break f;
+                    }
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        bail!(
+                            "Log file '{}' was not created after 5 seconds",
+                            log_file.display()
+                        );
+                    }
+                }
+            }
+            Err(e) => bail!("Failed to open log file '{}': {}", log_file.display(), e),
+        };
+
+        let mut buf = Vec::new();
+        let _ = file.read_to_end(&mut buf);
+        print!("{}", String::from_utf8_lossy(&buf));
+        let _ = std::io::stdout().flush();
+
+        if follow {
+            let mut pos = buf.len() as u64;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                if let Ok(meta) = std::fs::metadata(&log_file) {
+                    if meta.len() > pos {
+                        use std::io::Seek;
+                        if let Ok(mut f) = std::fs::File::open(&log_file) {
+                            if f.seek(std::io::SeekFrom::Start(pos)).is_ok() {
+                                let mut new_buf = Vec::new();
+                                if f.read_to_end(&mut new_buf).is_ok() {
+                                    pos = meta.len();
+                                    print!("{}", String::from_utf8_lossy(&new_buf));
+                                    let _ = std::io::stdout().flush();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (name, svc_state) in &state.services {
+            if let Ok(Some(vm)) = StateManager::find(data_dir, &svc_state.instance_id) {
+                let log_file = vm.instance_dir.join("console.log");
+                if let Ok(mut f) = std::fs::File::open(&log_file) {
+                    let mut content = String::new();
+                    let _ = f.read_to_string(&mut content);
+                    for line in content.lines() {
+                        println!("{:<12} | {}", name, line);
+                    }
+                }
+            }
+        }
+
+        if follow {
+            println!("Streaming logs (Press Ctrl+C to exit)...");
+            let mut file_positions: HashMap<String, u64> = HashMap::new();
+            for (name, svc_state) in &state.services {
+                if let Ok(Some(vm)) = StateManager::find(data_dir, &svc_state.instance_id) {
+                    let log_file = vm.instance_dir.join("console.log");
+                    if let Ok(meta) = std::fs::metadata(&log_file) {
+                        file_positions.insert(name.clone(), meta.len());
+                    }
+                }
+            }
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                for (name, svc_state) in &state.services {
+                    if let Ok(Some(vm)) = StateManager::find(data_dir, &svc_state.instance_id) {
+                        let log_file = vm.instance_dir.join("console.log");
+                        let pos = file_positions.get(name).copied().unwrap_or(0);
+                        if let Ok(meta) = std::fs::metadata(&log_file) {
+                            if meta.len() > pos {
+                                use std::io::Seek;
+                                if let Ok(mut f) = std::fs::File::open(&log_file) {
+                                    if f.seek(std::io::SeekFrom::Start(pos)).is_ok() {
+                                        let mut new_content = String::new();
+                                        if f.read_to_string(&mut new_content).is_ok() {
+                                            file_positions.insert(name.clone(), meta.len());
+                                            for line in new_content.lines() {
+                                                println!("{:<12} | {}", name, line);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_compose_stop(
+    project: &ComposeProject,
+    data_dir: &Path,
+    services_filter: &[String],
+) -> Result<()> {
+    use std::io::Write;
+
+    let mut state = match project.load_state()? {
+        Some(s) => s,
+        None => {
+            println!("No active state found for project '{}'.", project.name);
+            return Ok(());
+        }
+    };
+
+    println!("[+] Stopping services for project '{}':", project.name);
+    for (name, svc) in state.services.iter_mut() {
+        if !services_filter.is_empty() && !services_filter.contains(name) {
+            continue;
+        }
+        print!(
+            " ⏳ Stopping service '{}' (ID: {})...",
+            name, svc.instance_id
+        );
+        let _ = std::io::stdout().flush();
+        let _ = StateManager::stop(data_dir, &svc.instance_id);
+        svc.status = "stopped".to_string();
+        println!("\r ✔ Service '{}' stopped", name);
+    }
+    project.save_state(&state)?;
+    Ok(())
+}
+
+async fn handle_compose_start(
+    project: &ComposeProject,
+    data_dir: &Path,
+    services_filter: &[String],
+) -> Result<()> {
+    use std::io::Write;
+
+    let mut state = project
+        .load_state()?
+        .unwrap_or_else(|| ComposeProjectState {
+            name: project.name.clone(),
+            compose_file: project.base_dir.join("krun-compose.yaml"),
+            working_dir: project.base_dir.clone(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            services: BTreeMap::new(),
+        });
+
+    let launch_order = project.resolve_launch_order()?;
+    let to_start: Vec<String> = if services_filter.is_empty() {
+        launch_order
+    } else {
+        launch_order
+            .into_iter()
+            .filter(|s| services_filter.contains(s))
+            .collect()
+    };
+
+    println!("[+] Starting services for project '{}':", project.name);
+    for name in &to_start {
+        if let Some(svc) = state.services.get(name) {
+            if let Ok(Some(existing_vm)) = StateManager::find(data_dir, &svc.instance_id) {
+                if existing_vm.is_process_alive() {
+                    println!(" ✔ Service '{}' is already running", name);
+                    continue;
+                }
+            }
+        }
+
+        print!(" ⏳ Starting service '{}'...", name);
+        let _ = std::io::stdout().flush();
+        let builder = project.build_service_vm(name)?;
+        let vm = builder
+            .run()
+            .await
+            .with_context(|| format!("Failed to start service '{name}'"))?;
+        let svc_spec = &project.spec.services[name];
+
+        state.services.insert(
+            name.clone(),
+            ComposeServiceState {
+                service_name: name.clone(),
+                instance_id: vm.id().to_string(),
+                pid: vm.pid(),
+                image: svc_spec.image.clone(),
+                status: "running".to_string(),
+                ports: svc_spec.ports.clone(),
+            },
+        );
+        println!(
+            "\r ✔ Service '{}' started  (ID: {}, PID: {:?})",
+            name,
+            vm.id(),
+            vm.pid()
+        );
+    }
+    project.save_state(&state)?;
+    Ok(())
+}
+
+async fn handle_compose_restart(
+    project: &ComposeProject,
+    data_dir: &Path,
+    services_filter: &[String],
+) -> Result<()> {
+    println!("[+] Restarting services for project '{}':", project.name);
+    handle_compose_stop(project, data_dir, services_filter)?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    handle_compose_start(project, data_dir, services_filter).await?;
+    Ok(())
+}
+
+fn handle_compose_config(project: &ComposeProject) -> Result<()> {
+    let yaml = serde_yaml::to_string(&project.spec)
+        .context("Failed to serialize resolved compose configuration to YAML")?;
+    println!("{yaml}");
+    Ok(())
+}
+
+fn get_git_head(repo_path: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn get_git_commits_between(repo_path: &Path, base: &str, head: &str) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["log", "--oneline", &format!("{base}..{head}")])
+        .current_dir(repo_path)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn cherry_pick_sandbox_to_host(
+    sandbox_ws: &Path,
+    host_ws: &Path,
+    base_commit: &str,
+    target_commit: &str,
+) -> Result<()> {
+    let patch_output = std::process::Command::new("git")
+        .args([
+            "format-patch",
+            &format!("{base_commit}..{target_commit}"),
+            "--stdout",
+        ])
+        .current_dir(sandbox_ws)
+        .output()
+        .context("Failed to format patch from sandbox git repository")?;
+
+    if !patch_output.status.success() {
+        bail!(
+            "Failed to format patch from sandbox: {}",
+            String::from_utf8_lossy(&patch_output.stderr)
+        );
+    }
+
+    if patch_output.stdout.is_empty() {
+        println!("No git commits to cherry-pick.");
+        return Ok(());
+    }
+
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .args(["am", "--3way"])
+        .current_dir(host_ws)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn 'git am' on host repository")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&patch_output.stdout)?;
+    }
+
+    let result = child.wait_with_output()?;
+    if !result.status.success() {
+        bail!(
+            "git am failed: {}\n(You may run 'git am --abort' to reset the host repository state)",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -2503,6 +3513,198 @@ mod tests {
                 assert_eq!(secrets, vec!["CUSTOM_KEY=secretval".to_string()]);
             }
             _ => panic!("Expected Commands::Sandbox"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_compose_up_and_down() {
+        let up_args = vec![
+            "microvm",
+            "compose",
+            "up",
+            "-f",
+            "krun-compose.yaml",
+            "-d",
+            "web",
+            "redis",
+        ];
+        let cli = Cli::try_parse_from(up_args).unwrap();
+        match cli.command {
+            Commands::Compose {
+                command:
+                    ComposeCommands::Up {
+                        file,
+                        detach,
+                        services,
+                        ..
+                    },
+            } => {
+                assert_eq!(file, Some(PathBuf::from("krun-compose.yaml")));
+                assert!(detach);
+                assert_eq!(services, vec!["web".to_string(), "redis".to_string()]);
+            }
+            _ => panic!("Expected ComposeCommands::Up"),
+        }
+
+        let down_args = vec!["microvm", "compose", "down", "-v"];
+        let cli_down = Cli::try_parse_from(down_args).unwrap();
+        match cli_down.command {
+            Commands::Compose {
+                command: ComposeCommands::Down { file, volumes, .. },
+            } => {
+                assert!(file.is_none());
+                assert!(volumes);
+            }
+            _ => panic!("Expected ComposeCommands::Down"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_compose_ps_and_logs() {
+        let ps_args = vec!["microvm", "compose", "ps", "-f", "compose.yaml"];
+        let cli_ps = Cli::try_parse_from(ps_args).unwrap();
+        match cli_ps.command {
+            Commands::Compose {
+                command: ComposeCommands::Ps { file, .. },
+            } => {
+                assert_eq!(file, Some(PathBuf::from("compose.yaml")));
+            }
+            _ => panic!("Expected ComposeCommands::Ps"),
+        }
+
+        let logs_args = vec![
+            "microvm",
+            "compose",
+            "logs",
+            "--file",
+            "compose.yaml",
+            "-f",
+            "api",
+        ];
+        let cli_logs = Cli::try_parse_from(logs_args).unwrap();
+        match cli_logs.command {
+            Commands::Compose {
+                command:
+                    ComposeCommands::Logs {
+                        file,
+                        service,
+                        follow,
+                        ..
+                    },
+            } => {
+                assert_eq!(file, Some(PathBuf::from("compose.yaml")));
+                assert_eq!(service, Some("api".to_string()));
+                assert!(follow);
+            }
+            _ => panic!("Expected ComposeCommands::Logs"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_compose_restart_and_config() {
+        let restart_args = vec!["microvm", "compose", "restart", "web"];
+        let cli_res = Cli::try_parse_from(restart_args).unwrap();
+        match cli_res.command {
+            Commands::Compose {
+                command: ComposeCommands::Restart { services, .. },
+            } => {
+                assert_eq!(services, vec!["web".to_string()]);
+            }
+            _ => panic!("Expected ComposeCommands::Restart"),
+        }
+
+        let config_args = vec!["microvm", "compose", "config", "-f", "krun-compose.yaml"];
+        let cli_cfg = Cli::try_parse_from(config_args).unwrap();
+        match cli_cfg.command {
+            Commands::Compose {
+                command: ComposeCommands::Config { file, .. },
+            } => {
+                assert_eq!(file, Some(PathBuf::from("krun-compose.yaml")));
+            }
+            _ => panic!("Expected ComposeCommands::Config"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_apply_and_run_file() {
+        let apply_args = vec![
+            "microvm",
+            "apply",
+            "-f",
+            "examples/microvm.yaml",
+            "-d",
+        ];
+        let cli = Cli::try_parse_from(apply_args).unwrap();
+        match cli.command {
+            Commands::Apply { file, detach, .. } => {
+                assert_eq!(file, PathBuf::from("examples/microvm.yaml"));
+                assert!(detach);
+            }
+            _ => panic!("Expected Commands::Apply"),
+        }
+
+        let run_args = vec!["microvm", "run", "-f", "examples/krun-compose.yaml", "-d"];
+        let cli_run = Cli::try_parse_from(run_args).unwrap();
+        match cli_run.command {
+            Commands::Run(run) => {
+                assert_eq!(run.file, Some(PathBuf::from("examples/krun-compose.yaml")));
+                assert!(run.detach);
+            }
+            _ => panic!("Expected Commands::Run with -f"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_sandbox_cherry_pick() {
+        let args = vec![
+            "microvm",
+            "sandbox",
+            "claude",
+            "--workspace",
+            "/path/to/project",
+            "--cherry-pick",
+            "a1b2c3d4",
+            "--apply-to-host",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::Sandbox {
+                agent,
+                workspace,
+                cherry_pick,
+                apply_to_host,
+                ..
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(workspace, PathBuf::from("/path/to/project"));
+                assert_eq!(cherry_pick, Some("a1b2c3d4".to_string()));
+                assert!(apply_to_host);
+            }
+            _ => panic!("Expected Commands::Sandbox with cherry-pick"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_cherry_pick_command() {
+        let args = vec![
+            "microvm",
+            "cherry-pick",
+            "vm-test1234",
+            "-w",
+            "/host/workspace",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Commands::CherryPick {
+                id,
+                workspace,
+                data_dir,
+            } => {
+                assert_eq!(id, "vm-test1234");
+                assert_eq!(workspace, PathBuf::from("/host/workspace"));
+                assert!(data_dir.is_none());
+            }
+            _ => panic!("Expected Commands::CherryPick"),
         }
     }
 }

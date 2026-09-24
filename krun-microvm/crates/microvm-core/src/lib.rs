@@ -1,5 +1,6 @@
 pub mod acceleration;
 pub mod bundle;
+pub mod compose;
 pub mod config;
 pub mod exec;
 pub mod metrics;
@@ -15,6 +16,10 @@ pub mod vm;
 
 pub use acceleration::{AccelerationFormat, ImageAcceleration};
 pub use bundle::OciBundle;
+pub use compose::{
+    ComposeNetworkSpec, ComposeProject, ComposeProjectState, ComposeServiceState, ComposeSpec,
+    ComposeVolumeSpec, K8sMetadata, K8sMicroVmManifest, K8sMicroVmSpec, Manifest, ServiceSpec,
+};
 
 pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};

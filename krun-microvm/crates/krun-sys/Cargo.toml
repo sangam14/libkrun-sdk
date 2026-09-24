@@ -11,3 +11,4 @@ thiserror = { workspace = true }
 
 [build-dependencies]
 cc = "1.0"
+pkg-config = "0.3"

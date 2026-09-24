@@ -1,0 +1,40 @@
+# Krun MicroVM Compose Specification
+# Declarative multi-microVM orchestration powered by libkrun hardware virtualization.
+#
+# Usage:
+#   microvm compose up
+#   microvm compose up -d
+#   microvm compose ps
+#   microvm compose logs -f
+#   microvm compose down
+
+version: "3.8"
+name: demo-stack
+
+services:
+  # Redis cache running in a hardware-isolated microVM
+  redis:
+    image: redis:alpine
+    cpus: 1
+    memory: 256M
+    ports:
+      - "6379:6379"
+    volumes:
+      - "./redis-data:/data"
+    command: ["redis-server", "--appendonly", "yes"]
+
+  # Web frontend / API reverse proxy microVM
+  web:
+    image: nginx:alpine
+    cpus: 2
+    memory: 512M
+    depends_on:
+      - redis
+    ports:
+      - "18080:80"
+    environment:
+      APP_ENV: production
+      CACHE_HOST: 127.0.0.1
+      CACHE_PORT: "6379"
+    volumes:
+      - "./html:/usr/share/nginx/html:ro"

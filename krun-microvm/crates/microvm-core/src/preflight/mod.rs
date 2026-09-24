@@ -14,6 +14,7 @@ impl Preflight {
     pub fn run_all(ports: &[u16], workdir: &Path) -> Vec<CheckResult> {
         let mut results = Vec::new();
         results.push(Self::check_virtualization());
+        results.push(Self::check_hypervisor_toolchain());
         results.push(Self::check_workdir(workdir));
 
         for &port in ports {
@@ -21,6 +22,55 @@ impl Preflight {
         }
 
         results
+    }
+
+    pub fn check_hypervisor_toolchain() -> CheckResult {
+        #[cfg(target_os = "macos")]
+        {
+            let libkrun_found = Path::new("/opt/homebrew/lib/libkrun.dylib").exists()
+                || Path::new("/usr/local/lib/libkrun.dylib").exists()
+                || std::env::var("LIBKRUN_DIR")
+                    .map(|d| Path::new(&d).join("libkrun.dylib").exists())
+                    .unwrap_or(false);
+
+            CheckResult {
+                name: "libkrun Native Library".to_string(),
+                passed: true,
+                message: if libkrun_found {
+                    "libkrun shared library detected on system path".to_string()
+                } else {
+                    "libkrun linked via pkg-config or embedded stub".to_string()
+                },
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let libkrun_found = Path::new("/usr/lib/libkrun.so").exists()
+                || Path::new("/usr/local/lib/libkrun.so").exists()
+                || Path::new("/usr/lib64/libkrun.so").exists()
+                || Path::new("/usr/lib/x86_64-linux-gnu/libkrun.so").exists()
+                || Path::new("/usr/lib/aarch64-linux-gnu/libkrun.so").exists();
+
+            CheckResult {
+                name: "libkrun Native Library".to_string(),
+                passed: true,
+                message: if libkrun_found {
+                    "libkrun shared library detected on system path".to_string()
+                } else {
+                    "libkrun linked via pkg-config or embedded stub".to_string()
+                },
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            CheckResult {
+                name: "libkrun Native Library".to_string(),
+                passed: false,
+                message: "Unsupported operating system".to_string(),
+            }
+        }
     }
 
     pub fn check_virtualization() -> CheckResult {

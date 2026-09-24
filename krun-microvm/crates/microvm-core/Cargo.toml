@@ -24,6 +24,7 @@ libc = { workspace = true }
 tempfile = { workspace = true }
 bytes = { workspace = true }
 oci-spec = { workspace = true }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

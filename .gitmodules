@@ -1,3 +1,6 @@
 [submodule "libkrun"]
 	path = libkrun
 	url = https://github.com/libkrun/libkrun
+[submodule "libkrunfw"]
+	path = libkrunfw
+	url = https://github.com/libkrun/libkrunfw

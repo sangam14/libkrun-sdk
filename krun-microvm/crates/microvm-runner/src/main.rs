@@ -7,17 +7,15 @@ mod sandbox;
 mod supervisor;
 mod watchdog;
 
-/// Returns a file descriptor safe for use with kqueue/epoll as the console input.
+/// Ensures stdin (FD 0) is pollable by kqueue/epoll.
 ///
 /// When stdin is not a TTY (daemon mode, redirected input, /dev/null), libkrun's
 /// event loop will abort with an assertion failure on non-pollable descriptors.
-/// We substitute the read-end of an internal pipe that stays open and pollable.
-///
-/// Uses `O_CLOEXEC` to prevent FD leaks across fork/exec boundaries, and
-/// explicitly closes the write-end since nothing will write to it.
-fn safe_console_input_fd() -> Result<i32> {
+/// We substitute stdin with the read-end of an internal pipe.
+/// The write-end is intentionally kept open to prevent spurious EOF/READ_HANG_UP loops.
+fn ensure_pollable_stdin() -> Result<()> {
     if unsafe { libc::isatty(0) } == 1 {
-        return Ok(0);
+        return Ok(());
     }
 
     let mut fds = [0i32; 2];
@@ -28,15 +26,21 @@ fn safe_console_input_fd() -> Result<i32> {
         );
     }
 
-    // Set CLOEXEC on the read-end to prevent leaking into forked child processes.
-    unsafe { libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC) };
+    unsafe {
+        if libc::dup2(fds[0], 0) < 0 {
+            bail!(
+                "Failed to redirect stdin to fallback pipe: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        libc::close(fds[0]);
+    }
 
-    // Close the write-end immediately — we only need the read-end to stay
-    // open and pollable. The read-end will EOF if this process exits, which
-    // is the correct behavior for a dummy console input.
-    unsafe { libc::close(fds[1]) };
+    // Keep write-end open in static atomic so kqueue never fires continuous EV_EOF/READ_HANG_UP
+    static DUMMY_WRITE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+    DUMMY_WRITE_FD.store(fds[1], std::sync::atomic::Ordering::Relaxed);
 
-    Ok(fds[0])
+    Ok(())
 }
 
 fn validate_config(cfg: &RunnerConfig) -> Result<()> {
@@ -278,11 +282,8 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             .with_context(|| format!("Failed to add vsock port {}", vp.port))?;
     }
 
-    // Configure serial console and ensure pollable input descriptor to prevent kqueue/epoll aborts
-    let in_fd = safe_console_input_fd()?;
-    let _ = ctx.disable_implicit_console();
-    ctx.add_serial_console_default(in_fd, 1)
-        .context("Failed to configure default serial console")?;
+    // Ensure stdin is pollable on macOS/Linux to prevent kqueue/epoll assertion aborts
+    ensure_pollable_stdin()?;
 
     // Install watchdog for hypervisor resilience (macOS SMP PSCI CPU_OFF panic)
     #[cfg(target_os = "macos")]
