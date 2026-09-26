@@ -1,11 +1,10 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use microvm_core::compose::{ComposeProject, ComposeProjectState, ComposeServiceState};
 use microvm_core::{
-    collect_process_stats, detect_kernel_format, parse_kernel_format, ImageReference,
-    MicroVmBuilder, OciArtifact, OciClient, OciLayout, Preflight, StateManager, VmStatus,
-};
-use microvm_core::compose::{
-    ComposeProject, ComposeProjectState, ComposeServiceState,
+    collect_process_stats, detect_kernel_format, parse_kernel_format, BuildEngine, BuildOptions,
+    ImageReference, MicroVmBuilder, OciArtifact, OciClient, OciLayout, Preflight, StateManager,
+    VmStatus,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -184,6 +183,10 @@ pub struct RunArgs {
     /// Attach block disk image: <path> or <id>:<path>[:ro]
     #[arg(long = "disk")]
     pub disks: Vec<String>,
+
+    /// Size of POSIX shared memory (/dev/shm) mounted inside the guest (e.g. 64m, 512m, 2g; default: 64m)
+    #[arg(long = "shm-size")]
+    pub shm_size: Option<String>,
 
     /// Optional command to override ENTRYPOINT/CMD
     #[arg(last = true)]
@@ -560,6 +563,62 @@ enum Commands {
     /// Manage microVM virtual networking, port mappings, and egress policies
     #[command(subcommand)]
     Network(NetworkCommands),
+
+    /// Build an OCI image from a Dockerfile using the native in-process engine
+    Build {
+        /// Name and optionally a tag in the 'name:tag' format
+        #[arg(short = 't', long = "tag")]
+        tag: Option<String>,
+
+        /// Name of the Dockerfile (Default is 'PATH/Dockerfile')
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+
+        /// Do not use cache when building the image
+        #[arg(long = "no-cache")]
+        no_cache: bool,
+
+        /// Path to the build context directory (defaults to current directory)
+        #[arg(default_value = ".")]
+        context: PathBuf,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Manage Kubernetes Pod specifications with hardware microVM isolation
+    Kube {
+        #[command(subcommand)]
+        command: KubeCommands,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum KubeCommands {
+    /// Play/launch containers defined in a Kubernetes Pod manifest
+    Play {
+        /// Path to the Kubernetes Pod YAML file
+        file: PathBuf,
+
+        /// Run microVMs in background (detached mode)
+        #[arg(short = 'd', long)]
+        detach: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Stop and tear down all containers in a Kubernetes Pod manifest
+    Down {
+        /// Path to the Kubernetes Pod YAML file
+        file: PathBuf,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -850,6 +909,7 @@ async fn main() -> Result<()> {
                 cmdline,
                 firmware,
                 disks,
+                shm_size,
                 cmd,
                 file,
             } = *run;
@@ -886,7 +946,12 @@ async fn main() -> Result<()> {
                 } else {
                     detect_kernel_format(kpath)
                 };
-                MicroVmBuilder::new("").kernel_with_format(kpath.clone(), format_val, initrd, cmdline)
+                MicroVmBuilder::new("").kernel_with_format(
+                    kpath.clone(),
+                    format_val,
+                    initrd,
+                    cmdline,
+                )
             } else if let Some(ref fpath) = firmware {
                 if !detach {
                     println!("🚀 UEFI firmware boot: {}", fpath.display());
@@ -965,6 +1030,10 @@ async fn main() -> Result<()> {
 
             if let Some(w) = workdir {
                 builder = builder.workdir(w);
+            }
+
+            if let Some(shm) = shm_size {
+                builder = builder.shm_size(shm);
             }
 
             if let Some(lvl) = log_level {
@@ -1283,7 +1352,11 @@ fi"#
             }
 
             let startup_script = script_parts.join("\n");
-            builder = builder.cmd(vec!["/bin/sh".to_string(), "-c".to_string(), startup_script]);
+            builder = builder.cmd(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                startup_script,
+            ]);
 
             let mut vm = builder.run().await.context("Failed to start sandbox")?;
             let status = vm.wait().await?;
@@ -1310,13 +1383,17 @@ fi"#
                             }
 
                             if apply_to_host {
-                                println!("🚀 Cherry-picking sandbox commit(s) to host workspace...");
+                                println!(
+                                    "🚀 Cherry-picking sandbox commit(s) to host workspace..."
+                                );
                                 match cherry_pick_sandbox_to_host(&cow_ws, &abs_ws, h_head, s_head) {
                                     Ok(_) => println!("✅ Successfully cherry-picked sandbox changes to host branch!"),
                                     Err(e) => eprintln!("⚠️ Failed to cherry-pick to host: {e}"),
                                 }
                             } else {
-                                println!("\n💡 Tip: To apply these commits to your host branch, run:");
+                                println!(
+                                    "\n💡 Tip: To apply these commits to your host branch, run:"
+                                );
                                 println!("   microvm cherry-pick {}", vm.id());
                             }
                         }
@@ -2227,14 +2304,8 @@ fi"#
                 let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
                 let compose_file = resolve_compose_file(file)?;
                 let project = ComposeProject::load(&compose_file, Some(base_data_dir.clone()))?;
-                handle_compose_up(
-                    &project,
-                    &compose_file,
-                    &base_data_dir,
-                    detach,
-                    &services,
-                )
-                .await?;
+                handle_compose_up(&project, &compose_file, &base_data_dir, detach, &services)
+                    .await?;
             }
             ComposeCommands::Down {
                 file,
@@ -2338,8 +2409,8 @@ fi"#
 
             let host_head = get_git_head(&abs_host_ws)
                 .context("Host workspace is not a valid git repository (no HEAD found)")?;
-            let sandbox_head = get_git_head(&cow_ws)
-                .context("Sandbox workspace is not a valid git repository")?;
+            let sandbox_head =
+                get_git_head(&cow_ws).context("Sandbox workspace is not a valid git repository")?;
 
             if host_head == sandbox_head {
                 println!(
@@ -2365,6 +2436,66 @@ fi"#
         }
 
         Commands::Network(net_cmd) => handle_network_command(net_cmd).await?,
+
+        Commands::Build {
+            tag,
+            file,
+            no_cache,
+            context,
+            data_dir,
+        } => {
+            let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+            let context_abs = std::fs::canonicalize(&context).unwrap_or(context);
+            if !context_abs.exists() {
+                bail!(
+                    "Build context path '{}' does not exist",
+                    context_abs.display()
+                );
+            }
+
+            let mut opts = BuildOptions::new(context_abs, base_data_dir);
+            opts.no_cache = no_cache;
+            if let Some(t) = tag {
+                opts.tag = Some(t);
+            }
+            if let Some(f) = file {
+                opts.dockerfile_path = Some(f);
+            }
+
+            let engine = BuildEngine::new(opts);
+            println!("🔨 Building image with native in-process engine...");
+            let result = engine.build().await?;
+            println!("✅ Successfully built {}", result.digest);
+            if let Some(ref t) = result.tag {
+                println!("🏷️  Successfully tagged {}", t);
+            }
+        }
+
+        Commands::Kube { command } => match command {
+            KubeCommands::Play {
+                file,
+                detach,
+                data_dir,
+            } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                if !file.exists() {
+                    bail!("Kubernetes Pod file '{}' does not exist", file.display());
+                }
+                println!("🚀 Launching Kubernetes Pod from {}", file.display());
+                let project = ComposeProject::load(&file, Some(base_data_dir.clone()))?;
+                handle_compose_up(&project, &file, &base_data_dir, detach, &[]).await?;
+            }
+            KubeCommands::Down { file, data_dir } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                if !file.exists() {
+                    bail!("Kubernetes Pod file '{}' does not exist", file.display());
+                }
+                println!("🛑 Tearing down Kubernetes Pod from {}", file.display());
+                let project = ComposeProject::load(&file, Some(base_data_dir.clone()))?;
+                handle_compose_down(&project, &base_data_dir, false)?;
+                println!("✅ Pod containers successfully terminated.");
+            }
+        },
     }
 
     Ok(())
@@ -2402,8 +2533,8 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                 println!("No active microVM networks found.");
             } else {
                 println!(
-                    "{:<14} {:<12} {:<16} {:<16} {:<16} {:<18} {}",
-                    "MICROVM ID", "MODE", "GUEST IP", "GATEWAY", "PORTS", "EGRESS RULES", "STATUS"
+                    "{:<14} {:<12} {:<16} {:<16} {:<16} {:<18} STATUS",
+                    "MICROVM ID", "MODE", "GUEST IP", "GATEWAY", "PORTS", "EGRESS RULES"
                 );
                 println!("{:-<100}", "");
                 for item in inspections {
@@ -2477,7 +2608,10 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                 println!("  Virtual MAC:         {}", inspection.mac_address);
                 println!("  Interface MTU:       {}", inspection.mtu);
                 println!("  Guest Hostname:      {}", inspection.hostname);
-                println!("  DNS Resolvers:       {}", inspection.dns_servers.join(", "));
+                println!(
+                    "  DNS Resolvers:       {}",
+                    inspection.dns_servers.join(", ")
+                );
                 let pf_str = if inspection.port_forwards.is_empty() {
                     "None".to_string()
                 } else {
@@ -2575,8 +2709,8 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                 println!("No published port mappings found.");
             } else {
                 println!(
-                    "{:<12} {:<12} {:<10} {:<16} {:<12} {}",
-                    "HOST PORT", "GUEST PORT", "PROTOCOL", "MICROVM ID", "STATUS", "LOCAL ENDPOINT"
+                    "{:<12} {:<12} {:<10} {:<16} {:<12} LOCAL ENDPOINT",
+                    "HOST PORT", "GUEST PORT", "PROTOCOL", "MICROVM ID", "STATUS"
                 );
                 println!("{:-<80}", "");
                 for p in port_list {
@@ -2621,11 +2755,8 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                 "echo '[DNS Test]' && (getent hosts {target} 2>&1 || nslookup {target} 2>&1 || echo 'DNS resolution not available') && echo '[Ping/TCP Probe]' && (ping -c 2 -W 2 {target} 2>&1 || nc -z -w 2 {target} 80 2>&1 || curl -I -s --connect-timeout 2 {target} 2>&1 || echo 'Target unreachable or filtered')"
             );
 
-            let req = microvm_core::ExecRequest::new(vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                test_cmd,
-            ]);
+            let req =
+                microvm_core::ExecRequest::new(vec!["sh".to_string(), "-c".to_string(), test_cmd]);
             let resp = StateManager::exec(&base, &id, &req).await?;
 
             if !resp.stdout.is_empty() {
@@ -2637,7 +2768,10 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
             if resp.exit_code == 0 {
                 println!("\n✅ Network diagnostic probe completed successfully.");
             } else {
-                println!("\n⚠️ Network diagnostic returned exit code {}.", resp.exit_code);
+                println!(
+                    "\n⚠️ Network diagnostic returned exit code {}.",
+                    resp.exit_code
+                );
             }
         }
 
@@ -2653,7 +2787,9 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                     listen
                 );
                 if allow_hosts.is_empty() {
-                    println!("   Policy: Default-deny (all external egress blocked except loopback)");
+                    println!(
+                        "   Policy: Default-deny (all external egress blocked except loopback)"
+                    );
                 } else {
                     println!("   Allowed destinations:");
                     for h in &allow_hosts {
@@ -2667,9 +2803,13 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                 let mut routes_map = std::collections::HashMap::new();
                 for r in &route {
                     if let Some((prefix, target)) = r.split_once('=') {
-                        let target_addr: std::net::SocketAddr = target.parse().with_context(|| {
-                            format!("Invalid target socket address '{}' in route '{}'", target, r)
-                        })?;
+                        let target_addr: std::net::SocketAddr =
+                            target.parse().with_context(|| {
+                                format!(
+                                    "Invalid target socket address '{}' in route '{}'",
+                                    target, r
+                                )
+                            })?;
                         routes_map.insert(
                             prefix.to_string(),
                             microvm_core::MicroVmServiceBackend {
@@ -2679,7 +2819,10 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                             },
                         );
                     } else {
-                        bail!("Invalid route specification '{}'. Expected format /prefix=IP:PORT", r);
+                        bail!(
+                            "Invalid route specification '{}'. Expected format /prefix=IP:PORT",
+                            r
+                        );
                     }
                 }
                 println!(
@@ -2687,7 +2830,9 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                     listen
                 );
                 if routes_map.is_empty() {
-                    println!("   Warning: No routes configured. Pass --route /prefix=127.0.0.1:PORT");
+                    println!(
+                        "   Warning: No routes configured. Pass --route /prefix=127.0.0.1:PORT"
+                    );
                 } else {
                     println!("   Configured MicroVM Routes:");
                     for (prefix, backend) in &routes_map {
@@ -2831,7 +2976,7 @@ async fn handle_compose_up(
             for mut vm in active_vms {
                 let _ = vm.stop().await;
             }
-            for (_, svc_state) in state.services.iter_mut() {
+            for svc_state in state.services.values_mut() {
                 svc_state.status = "stopped".to_string();
             }
             let _ = project.save_state(&state);
@@ -4099,13 +4244,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_apply_and_run_file() {
-        let apply_args = vec![
-            "microvm",
-            "apply",
-            "-f",
-            "examples/microvm.yaml",
-            "-d",
-        ];
+        let apply_args = vec!["microvm", "apply", "-f", "examples/microvm.yaml", "-d"];
         let cli = Cli::try_parse_from(apply_args).unwrap();
         match cli.command {
             Commands::Apply { file, detach, .. } => {
@@ -4211,8 +4350,7 @@ mod tests {
         }
 
         // network inspect
-        let cli =
-            Cli::try_parse_from(vec!["microvm", "network", "inspect", "vm-net-123"]).unwrap();
+        let cli = Cli::try_parse_from(vec!["microvm", "network", "inspect", "vm-net-123"]).unwrap();
         match cli.command {
             Commands::Network(NetworkCommands::Inspect { id, json, .. }) => {
                 assert_eq!(id, "vm-net-123");
@@ -4277,5 +4415,79 @@ mod tests {
     fn test_truncate_str() {
         assert_eq!(truncate_str("hello", 10), "hello");
         assert_eq!(truncate_str("superlongstringexample", 8), "super...");
+    }
+
+    #[test]
+    fn test_cli_parse_shm_size() {
+        let cli = Cli::try_parse_from(vec![
+            "cro",
+            "run",
+            "--shm-size",
+            "2g",
+            "pytorch/pytorch:latest",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run(run_box) => {
+                assert_eq!(run_box.shm_size.as_deref(), Some("2g"));
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_build() {
+        let cli = Cli::try_parse_from(vec![
+            "cro",
+            "build",
+            "-t",
+            "custom-app:1.0",
+            "-f",
+            "custom.Dockerfile",
+            "--no-cache",
+            "./src",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Build {
+                tag,
+                file,
+                no_cache,
+                context,
+                ..
+            } => {
+                assert_eq!(tag.as_deref(), Some("custom-app:1.0"));
+                assert_eq!(file, Some(PathBuf::from("custom.Dockerfile")));
+                assert!(no_cache);
+                assert_eq!(context, PathBuf::from("./src"));
+            }
+            _ => panic!("Expected Commands::Build"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_kube() {
+        // kube play
+        let cli = Cli::try_parse_from(vec!["cro", "kube", "play", "-d", "pod.yaml"]).unwrap();
+        match cli.command {
+            Commands::Kube {
+                command: KubeCommands::Play { file, detach, .. },
+            } => {
+                assert_eq!(file, PathBuf::from("pod.yaml"));
+                assert!(detach);
+            }
+            _ => panic!("Expected KubeCommands::Play"),
+        }
+
+        // kube down
+        let cli = Cli::try_parse_from(vec!["cro", "kube", "down", "pod.yaml"]).unwrap();
+        match cli.command {
+            Commands::Kube {
+                command: KubeCommands::Down { file, .. },
+            } => {
+                assert_eq!(file, PathBuf::from("pod.yaml"));
+            }
+            _ => panic!("Expected KubeCommands::Down"),
+        }
     }
 }

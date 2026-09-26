@@ -182,7 +182,10 @@ impl OciBundle {
             }
 
             // Annotation overrides for CPU and Memory
-            if let Some(cpus_str) = annotations.get("krun.cpus").or_else(|| annotations.get("krun.io/cpus")) {
+            if let Some(cpus_str) = annotations
+                .get("krun.cpus")
+                .or_else(|| annotations.get("krun.io/cpus"))
+            {
                 if let Ok(c) = cpus_str.trim().parse::<u8>() {
                     if c > 0 {
                         vcpus = Some(c);

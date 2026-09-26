@@ -276,6 +276,44 @@ impl Drop for EgressProxyServer {
     }
 }
 
+fn find_header_end(buf: &[u8]) -> Option<(usize, usize)> {
+    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some((pos, pos + 4))
+    } else {
+        buf.windows(2)
+            .position(|w| w == b"\n\n")
+            .map(|pos| (pos, pos + 2))
+    }
+}
+
+fn parse_content_length(headers: &str) -> Option<usize> {
+    for line in headers.lines() {
+        if line.to_ascii_lowercase().starts_with("content-length:") {
+            if let Some((_, val)) = line.split_once(':') {
+                return val.trim().parse::<usize>().ok();
+            }
+        }
+    }
+    None
+}
+
+fn adjust_content_length(headers: &str, new_body_len: usize) -> String {
+    let mut updated_lines = Vec::new();
+    let mut found_cl = false;
+    for line in headers.lines() {
+        if line.to_ascii_lowercase().starts_with("content-length:") {
+            updated_lines.push(format!("Content-Length: {new_body_len}"));
+            found_cl = true;
+        } else {
+            updated_lines.push(line.to_string());
+        }
+    }
+    if !found_cl && new_body_len > 0 {
+        updated_lines.push(format!("Content-Length: {new_body_len}"));
+    }
+    updated_lines.join("\r\n") + "\r\n\r\n"
+}
+
 async fn handle_client(
     mut client: TcpStream,
     policy: Arc<EgressPolicy>,
@@ -283,13 +321,25 @@ async fn handle_client(
     budget: Arc<LlmTokenBudget>,
     blocked_requests: Arc<AtomicU64>,
 ) -> Result<()> {
-    let mut buf = [0u8; 4096];
-    let n = client.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
-    }
+    let mut buf = Vec::with_capacity(8192);
+    let mut temp = [0u8; 8192];
 
-    let request_head = String::from_utf8_lossy(&buf[..n]);
+    // 1. Dynamically read headers until \r\n\r\n or \n\n
+    let (header_end, body_start) = loop {
+        let n = client.read(&mut temp).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&temp[..n]);
+        if let Some(pos) = find_header_end(&buf) {
+            break pos;
+        }
+        if buf.len() > 64 * 1024 {
+            bail!("HTTP request headers exceed maximum size (64 KiB)");
+        }
+    };
+
+    let request_head = String::from_utf8_lossy(&buf[..header_end]);
     let first_line = request_head.lines().next().unwrap_or_default();
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -327,6 +377,11 @@ async fn handle_client(
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
 
+        // Forward any extra bytes that were already read past CONNECT headers
+        if buf.len() > body_start {
+            upstream.write_all(&buf[body_start..]).await?;
+        }
+
         tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     } else {
         // Plain HTTP forward proxying
@@ -347,14 +402,46 @@ async fn handle_client(
             return Ok(());
         }
 
-        // Apply secret substitution on outbound request buffer
-        let modified_req = secrets.substitute(&buf[..n]);
+        // Read complete body if Content-Length is present
+        let content_len = parse_content_length(&request_head);
+        if let Some(expected_len) = content_len {
+            if expected_len > 32 * 1024 * 1024 {
+                bail!("Request body exceeds maximum allowed size (32 MiB)");
+            }
+            while buf.len() < body_start + expected_len {
+                let n = client.read(&mut temp).await?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&temp[..n]);
+            }
+        }
+
+        // Apply secret substitution on outbound headers and body
+        let headers_raw = &buf[..header_end];
+        let body_raw = &buf[body_start..];
+
+        let substituted_headers = secrets.substitute(headers_raw);
+        let substituted_body = secrets.substitute(body_raw);
+
+        let final_req = if content_len.is_some() {
+            let headers_str = String::from_utf8_lossy(&substituted_headers);
+            let updated_headers = adjust_content_length(&headers_str, substituted_body.len());
+            let mut out = updated_headers.into_bytes();
+            out.extend_from_slice(&substituted_body);
+            out
+        } else {
+            let mut out = substituted_headers;
+            out.extend_from_slice(b"\r\n\r\n");
+            out.extend_from_slice(&substituted_body);
+            out
+        };
 
         let mut upstream = TcpStream::connect((host.as_str(), port))
             .await
             .with_context(|| format!("Failed to connect to HTTP target {}:{}", host, port))?;
 
-        upstream.write_all(&modified_req).await?;
+        upstream.write_all(&final_req).await?;
 
         // Forward response back and monitor token usage
         let mut resp_buf = [0u8; 8192];
@@ -507,5 +594,76 @@ mod tests {
 
         assert!(resp_str.contains("403 Forbidden"));
         assert_eq!(proxy.blocked_count(), 1);
+    }
+
+    #[test]
+    fn test_adjust_content_length() {
+        let headers = "POST /v1/chat HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 10";
+        let adjusted = adjust_content_length(headers, 42);
+        assert!(adjusted.contains("Content-Length: 42"));
+        assert!(!adjusted.contains("Content-Length: 10"));
+        assert!(adjusted.ends_with("\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_buffering_and_secret_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut temp = [0u8; 1024];
+            let (h_end, b_start) = loop {
+                let n = stream.read(&mut temp).await.unwrap();
+                buf.extend_from_slice(&temp[..n]);
+                if let Some(pos) = find_header_end(&buf) {
+                    break pos;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..h_end]);
+            let cl = parse_content_length(&headers).unwrap();
+            while buf.len() < b_start + cl {
+                let n = stream.read(&mut temp).await.unwrap();
+                buf.extend_from_slice(&temp[..n]);
+            }
+            let body = &buf[b_start..];
+            assert_eq!(body.len(), cl);
+            assert!(String::from_utf8_lossy(body).contains("sk-proj-actual-long-key-999"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .unwrap();
+        });
+
+        let policy = EgressPolicy::new(vec![format!("127.0.0.1:{}", upstream_addr.port())]);
+        let secrets = SecretSubstitution::new(&[(
+            "API_KEY".to_string(),
+            "sk-proj-actual-long-key-999".to_string(),
+        )]);
+        let budget = LlmTokenBudget::default();
+
+        let proxy = EgressProxyServer::start(policy, secrets, budget)
+            .await
+            .unwrap();
+
+        let mut client = TcpStream::connect(format!("127.0.0.1:{}", proxy.port()))
+            .await
+            .unwrap();
+        let initial_body = format!("prefix_{}_krun-secret:API_KEY", "A".repeat(5000));
+        let req = format!(
+            "POST http://127.0.0.1:{}/test HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\n\r\n{}",
+            upstream_addr.port(),
+            upstream_addr.port(),
+            initial_body.len(),
+            initial_body
+        );
+
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut resp = [0u8; 256];
+        let n = client.read(&mut resp).await.unwrap();
+        let resp_str = String::from_utf8_lossy(&resp[..n]);
+        assert!(resp_str.contains("200 OK"));
     }
 }

@@ -12,9 +12,9 @@ pub use crate::types::PortForward;
 pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
 pub use gvproxy::{GvproxyConfig, GvproxyInstance};
 pub use pingora::{
-    create_pingora_egress_service, create_pingora_gateway_service, MicroVmServiceBackend,
-    PingoraEgressProxy, PingoraMicroVmGateway, PingoraRequestContext,
-    run_pingora_egress_server, run_pingora_gateway_server,
+    create_pingora_egress_service, create_pingora_gateway_service, run_pingora_egress_server,
+    run_pingora_gateway_server, MicroVmServiceBackend, PingoraEgressProxy, PingoraMicroVmGateway,
+    PingoraRequestContext,
 };
 
 /// Network mode for the microVM provider abstraction.
@@ -387,7 +387,6 @@ pub fn inspect_microvm_network(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,7 +481,8 @@ mod tests {
     #[test]
     fn test_inspect_microvm_network_fallback() {
         let dir = tempdir().unwrap();
-        let inspection = inspect_microvm_network(dir.path(), "vm-demo-123", Some(9999), true).unwrap();
+        let inspection =
+            inspect_microvm_network(dir.path(), "vm-demo-123", Some(9999), true).unwrap();
         assert_eq!(inspection.id, "vm-demo-123");
         assert_eq!(inspection.pid, Some(9999));
         assert!(inspection.status.contains("Running"));

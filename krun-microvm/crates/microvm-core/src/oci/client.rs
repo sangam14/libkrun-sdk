@@ -231,6 +231,15 @@ impl OciClient {
             reference.repository.clone(),
             reference.canonical_name(),
         ];
+        // 0a. Try locally built images first
+        for name in &local_names {
+            if let Ok(Some((rootfs, cfg))) = crate::builder::try_fetch_local_tag(name, cache_base) {
+                tracing::info!("Using locally built image '{}'", name);
+                return Ok((rootfs, cfg));
+            }
+        }
+
+        // 0b. Try local Docker / Podman daemon
         for name in &local_names {
             if let Ok(Some((rootfs, cfg))) =
                 super::daemon::DockerDaemon::try_fetch_and_unpack(name, cache_base)

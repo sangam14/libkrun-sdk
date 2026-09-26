@@ -92,6 +92,10 @@ pub struct ServiceSpec {
     #[serde(default, rename = "gpu_shm_size")]
     pub gpu_shm_size: Option<String>,
 
+    /// Size of /dev/shm (e.g. "64m", "2g")
+    #[serde(default, rename = "shm_size")]
+    pub shm_size: Option<String>,
+
     /// VirtioFS DAX window size (e.g. "4G")
     #[serde(default)]
     pub dax: Option<String>,
@@ -176,6 +180,8 @@ pub struct K8sMicroVmSpec {
     pub gpu: Option<bool>,
     #[serde(default, rename = "gpuShmSize")]
     pub gpu_shm_size: Option<String>,
+    #[serde(default, rename = "shmSize")]
+    pub shm_size: Option<String>,
     #[serde(default, rename = "networkMode")]
     pub network_mode: Option<String>,
     #[serde(default, rename = "allowEgress")]
@@ -196,11 +202,119 @@ pub struct K8sPortMapping {
     pub guest: u16,
 }
 
-/// Unified manifest abstraction: auto-detects Docker Compose or Kubernetes CRD formats.
+/// Standard Kubernetes `Pod` YAML definition (apiVersion: v1, kind: Pod).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct K8sPodManifest {
+    #[serde(rename = "apiVersion", default = "default_pod_api_version")]
+    pub api_version: String,
+
+    pub kind: String,
+
+    pub metadata: K8sMetadata,
+
+    pub spec: K8sPodSpec,
+}
+
+fn default_pod_api_version() -> String {
+    "v1".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sPodSpec {
+    pub containers: Vec<K8sContainerSpec>,
+    #[serde(default, rename = "restartPolicy")]
+    pub restart_policy: Option<String>,
+    #[serde(default)]
+    pub volumes: Option<Vec<K8sPodVolume>>,
+    #[serde(default, rename = "hostNetwork")]
+    pub host_network: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sContainerSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<Vec<K8sEnvVar>>,
+    #[serde(default)]
+    pub ports: Option<Vec<K8sContainerPort>>,
+    #[serde(default, rename = "workingDir")]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub resources: Option<K8sResourceRequirements>,
+    #[serde(default, rename = "volumeMounts")]
+    pub volume_mounts: Option<Vec<K8sVolumeMount>>,
+    #[serde(default, rename = "shmSize")]
+    pub shm_size: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sContainerPort {
+    #[serde(default, rename = "containerPort")]
+    pub container_port: u16,
+    #[serde(default, rename = "hostPort")]
+    pub host_port: Option<u16>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sResourceRequirements {
+    #[serde(default)]
+    pub limits: Option<K8sResourceLimits>,
+    #[serde(default)]
+    pub requests: Option<K8sResourceLimits>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sResourceLimits {
+    #[serde(default)]
+    pub cpu: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sVolumeMount {
+    pub name: String,
+    #[serde(rename = "mountPath")]
+    pub mount_path: String,
+    #[serde(default, rename = "readOnly")]
+    pub read_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sPodVolume {
+    pub name: String,
+    #[serde(default, rename = "hostPath")]
+    pub host_path: Option<K8sHostPathVolumeSource>,
+    #[serde(default, rename = "emptyDir")]
+    pub empty_dir: Option<K8sEmptyDirVolumeSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sHostPathVolumeSource {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct K8sEmptyDirVolumeSource {
+    #[serde(default, rename = "medium")]
+    pub medium: Option<String>,
+    #[serde(default, rename = "sizeLimit")]
+    pub size_limit: Option<String>,
+}
+
+/// Unified manifest abstraction: auto-detects Docker Compose, Kubernetes CRD, or Pod formats.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Manifest {
-    K8s(K8sMicroVmManifest),
+    Pod(Box<K8sPodManifest>),
+    K8s(Box<K8sMicroVmManifest>),
     Compose(ComposeSpec),
 }
 
@@ -223,6 +337,116 @@ impl Manifest {
     pub fn into_compose_spec(self) -> ComposeSpec {
         match self {
             Manifest::Compose(spec) => spec,
+            Manifest::Pod(pod) => {
+                let mut vol_lookup: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                if let Some(ref vols) = pod.spec.volumes {
+                    for v in vols {
+                        if let Some(ref hp) = v.host_path {
+                            vol_lookup.insert(v.name.clone(), hp.path.clone());
+                        }
+                    }
+                }
+
+                let mut services = BTreeMap::new();
+                for (idx, c) in pod.spec.containers.iter().enumerate() {
+                    let mut env_map = BTreeMap::new();
+                    if let Some(ref envs) = c.env {
+                        for e in envs {
+                            env_map.insert(e.name.clone(), e.value.clone());
+                        }
+                    }
+
+                    let mut port_strings = Vec::new();
+                    if let Some(ref ports) = c.ports {
+                        for p in ports {
+                            if let Some(hp) = p.host_port {
+                                port_strings.push(format!("{hp}:{}", p.container_port));
+                            } else {
+                                port_strings.push(format!("{}", p.container_port));
+                            }
+                        }
+                    }
+
+                    let mut volumes = Vec::new();
+                    if let Some(ref mounts) = c.volume_mounts {
+                        for m in mounts {
+                            if let Some(host_path) = vol_lookup.get(&m.name) {
+                                let ro_suffix = if m.read_only.unwrap_or(false) {
+                                    ":ro"
+                                } else {
+                                    ""
+                                };
+                                volumes
+                                    .push(format!("{}:{}{}", host_path, m.mount_path, ro_suffix));
+                            }
+                        }
+                    }
+
+                    let cpus = c
+                        .resources
+                        .as_ref()
+                        .and_then(|r| r.limits.as_ref().and_then(|l| l.cpu.as_ref()))
+                        .or_else(|| {
+                            c.resources
+                                .as_ref()
+                                .and_then(|r| r.requests.as_ref().and_then(|req| req.cpu.as_ref()))
+                        })
+                        .and_then(|s| s.parse::<u8>().ok());
+
+                    let memory = c
+                        .resources
+                        .as_ref()
+                        .and_then(|r| r.limits.as_ref().and_then(|l| l.memory.clone()))
+                        .or_else(|| {
+                            c.resources.as_ref().and_then(|r| {
+                                r.requests.as_ref().and_then(|req| req.memory.clone())
+                            })
+                        });
+
+                    let svc = ServiceSpec {
+                        image: c.image.clone(),
+                        cpus,
+                        memory,
+                        cmd: c.args.clone(),
+                        entrypoint: c.command.clone(),
+                        env: env_map,
+                        ports: port_strings,
+                        volumes,
+                        working_dir: c.working_dir.clone(),
+                        network_mode: if pod.spec.host_network.unwrap_or(false) {
+                            Some("host".to_string())
+                        } else {
+                            None
+                        },
+                        depends_on: if idx > 0 {
+                            vec![pod.spec.containers[idx - 1].name.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        networks: Vec::new(),
+                        restart: pod.spec.restart_policy.clone(),
+                        gpu: None,
+                        gpu_shm_size: None,
+                        shm_size: c.shm_size.clone(),
+                        dax: None,
+                        secrets: Vec::new(),
+                        allow_hosts: Vec::new(),
+                        sandbox: None,
+                        labels: pod.metadata.labels.clone(),
+                    };
+
+                    services.insert(c.name.clone(), svc);
+                }
+
+                ComposeSpec {
+                    version: "krun/k8s-pod".to_string(),
+                    name: Some(pod.metadata.name),
+                    services,
+                    volumes: BTreeMap::new(),
+                    networks: BTreeMap::new(),
+                }
+            }
             Manifest::K8s(k8s) => {
                 let mut env_map = BTreeMap::new();
                 if let Some(envs) = k8s.spec.env {
@@ -257,6 +481,7 @@ impl Manifest {
                     restart: None,
                     gpu: k8s.spec.gpu,
                     gpu_shm_size: k8s.spec.gpu_shm_size,
+                    shm_size: k8s.spec.shm_size,
                     dax: k8s.spec.dax_window_size,
                     secrets: Vec::new(),
                     allow_hosts: k8s.spec.allow_egress.unwrap_or_default(),
@@ -447,7 +672,11 @@ impl ComposeProject {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .canonicalize()
-            .unwrap_or_else(|_| path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+            .unwrap_or_else(|_| {
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf()
+            });
 
         let project_name = spec.name.clone().unwrap_or_else(|| {
             base_dir
@@ -457,7 +686,8 @@ impl ComposeProject {
         });
 
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let final_data_dir = data_dir.unwrap_or_else(|| PathBuf::from(home).join(".cache/krun-microvm"));
+        let final_data_dir =
+            data_dir.unwrap_or_else(|| PathBuf::from(home).join(".cache/krun-microvm"));
 
         Ok(Self::new(project_name, spec, base_dir, final_data_dir))
     }
@@ -476,11 +706,7 @@ impl ComposeProject {
         for (name, svc) in &self.spec.services {
             for dep in &svc.depends_on {
                 if !self.spec.services.contains_key(dep) {
-                    bail!(
-                        "Service '{}' depends on undefined service '{}'",
-                        name,
-                        dep
-                    );
+                    bail!("Service '{}' depends on undefined service '{}'", name, dep);
                 }
                 adj.get_mut(dep.as_str()).unwrap().push(name.as_str());
                 *in_degree.get_mut(name.as_str()).unwrap() += 1;
@@ -516,6 +742,32 @@ impl ComposeProject {
         Ok(order)
     }
 
+    /// Returns the virtual network IP assigned to a service.
+    ///
+    /// If any service in the compose spec uses isolated virtual networking (e.g. `gvproxy`),
+    /// assigns sequential IP addresses on the `192.168.127.0/24` subnet (e.g. `192.168.127.2`, `192.168.127.3`, ...).
+    /// Under TSI / host networking, returns `127.0.0.1`.
+    pub fn service_ip(&self, service_name: &str) -> String {
+        let any_gvproxy = self.spec.services.values().any(|s| {
+            s.network_mode
+                .as_deref()
+                .map(|m| m.eq_ignore_ascii_case("gvproxy"))
+                .unwrap_or(false)
+        });
+
+        if any_gvproxy {
+            let idx = self
+                .spec
+                .services
+                .keys()
+                .position(|k| k == service_name)
+                .unwrap_or(0);
+            format!("192.168.127.{}", 2 + idx)
+        } else {
+            "127.0.0.1".to_string()
+        }
+    }
+
     /// Builds a `MicroVmBuilder` configured for a specific service in the project.
     pub fn build_service_vm(&self, service_name: &str) -> Result<MicroVmBuilder> {
         let svc = self
@@ -540,8 +792,9 @@ impl ComposeProject {
         }
 
         if let Some(ref mem_str) = svc.memory {
-            let bytes = parse_size_to_bytes(mem_str)
-                .with_context(|| format!("Invalid memory value '{mem_str}' for service '{service_name}'"))?;
+            let bytes = parse_size_to_bytes(mem_str).with_context(|| {
+                format!("Invalid memory value '{mem_str}' for service '{service_name}'")
+            })?;
             builder = builder.memory_mb((bytes / (1024 * 1024)) as u32);
         } else {
             builder = builder.memory_mb(512);
@@ -590,6 +843,11 @@ impl ComposeProject {
             builder = builder.dax_window_size_str(dax_str)?;
         }
 
+        // Shared memory (/dev/shm)
+        if let Some(ref shm) = svc.shm_size {
+            builder = builder.shm_size(shm);
+        }
+
         // Secrets
         for s in &svc.secrets {
             let (k, v) = if let Some((k, v)) = s.split_once('=') {
@@ -621,7 +879,8 @@ impl ComposeProject {
         let mut extra_hosts = Vec::new();
         for peer_name in self.spec.services.keys() {
             if peer_name != service_name {
-                extra_hosts.push((peer_name.clone(), "127.0.0.1".to_string()));
+                let peer_ip = self.service_ip(peer_name);
+                extra_hosts.push((peer_name.clone(), peer_ip));
             }
         }
         builder = builder.extra_hosts(extra_hosts);
@@ -761,7 +1020,10 @@ services:
         assert_eq!(web.memory.as_deref(), Some("512M"));
         assert_eq!(web.ports, vec!["8080:80"]);
         assert_eq!(web.volumes, vec!["./html:/usr/share/nginx/html:ro"]);
-        assert_eq!(web.env.get("APP_ENV").map(|s| s.as_str()), Some("production"));
+        assert_eq!(
+            web.env.get("APP_ENV").map(|s| s.as_str()),
+            Some("production")
+        );
         assert_eq!(web.env.get("PORT").map(|s| s.as_str()), Some("80"));
 
         let db = &spec.services["db"];
@@ -815,16 +1077,22 @@ spec:
     fn test_topological_sort_launch_order() {
         let mut services = BTreeMap::new();
 
-        let mut frontend = ServiceSpec::default();
-        frontend.image = "frontend:latest".to_string();
-        frontend.depends_on = vec!["api".to_string()];
+        let frontend = ServiceSpec {
+            image: "frontend:latest".to_string(),
+            depends_on: vec!["api".to_string()],
+            ..Default::default()
+        };
 
-        let mut api = ServiceSpec::default();
-        api.image = "api:latest".to_string();
-        api.depends_on = vec!["db".to_string()];
+        let api = ServiceSpec {
+            image: "api:latest".to_string(),
+            depends_on: vec!["db".to_string()],
+            ..Default::default()
+        };
 
-        let mut db = ServiceSpec::default();
-        db.image = "db:latest".to_string();
+        let db = ServiceSpec {
+            image: "db:latest".to_string(),
+            ..Default::default()
+        };
 
         services.insert("frontend".to_string(), frontend);
         services.insert("api".to_string(), api);
@@ -839,7 +1107,9 @@ spec:
         };
 
         let project = ComposeProject::new("test-project", spec, "/tmp", "/tmp");
-        let order = project.resolve_launch_order().expect("Dependency sort failed");
+        let order = project
+            .resolve_launch_order()
+            .expect("Dependency sort failed");
 
         assert_eq!(order, vec!["db", "api", "frontend"]);
     }
@@ -848,13 +1118,17 @@ spec:
     fn test_circular_dependency_detected() {
         let mut services = BTreeMap::new();
 
-        let mut a = ServiceSpec::default();
-        a.image = "a:latest".to_string();
-        a.depends_on = vec!["b".to_string()];
+        let a = ServiceSpec {
+            image: "a:latest".to_string(),
+            depends_on: vec!["b".to_string()],
+            ..Default::default()
+        };
 
-        let mut b = ServiceSpec::default();
-        b.image = "b:latest".to_string();
-        b.depends_on = vec!["a".to_string()];
+        let b = ServiceSpec {
+            image: "b:latest".to_string(),
+            depends_on: vec!["a".to_string()],
+            ..Default::default()
+        };
 
         services.insert("a".to_string(), a);
         services.insert("b".to_string(), b);
@@ -892,5 +1166,123 @@ env:
         let svc2: ServiceSpec = serde_yaml::from_str(yaml_map).unwrap();
         assert_eq!(svc2.env.get("FOO").unwrap(), "BAR");
         assert_eq!(svc2.env.get("BAZ").unwrap(), "123");
+    }
+
+    #[test]
+    fn test_compose_service_ip_assignment() {
+        let mut services = BTreeMap::new();
+        services.insert(
+            "api".to_string(),
+            ServiceSpec {
+                image: "api:latest".to_string(),
+                network_mode: Some("gvproxy".to_string()),
+                ..Default::default()
+            },
+        );
+        services.insert(
+            "db".to_string(),
+            ServiceSpec {
+                image: "postgres:16".to_string(),
+                network_mode: Some("gvproxy".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let spec = ComposeSpec {
+            version: "krun/v1".to_string(),
+            name: Some("gvproxy-project".to_string()),
+            services,
+            volumes: BTreeMap::new(),
+            networks: BTreeMap::new(),
+        };
+
+        let project = ComposeProject::new("gvproxy-project", spec, "/tmp", "/tmp");
+        assert_eq!(project.service_ip("api"), "192.168.127.2");
+        assert_eq!(project.service_ip("db"), "192.168.127.3");
+
+        // TSI or default returns 127.0.0.1
+        let mut tsi_services = BTreeMap::new();
+        tsi_services.insert(
+            "web".to_string(),
+            ServiceSpec {
+                image: "nginx:latest".to_string(),
+                network_mode: Some("tsi".to_string()),
+                ..Default::default()
+            },
+        );
+        let tsi_spec = ComposeSpec {
+            version: "krun/v1".to_string(),
+            name: Some("tsi-project".to_string()),
+            services: tsi_services,
+            volumes: BTreeMap::new(),
+            networks: BTreeMap::new(),
+        };
+        let tsi_proj = ComposeProject::new("tsi-project", tsi_spec, "/tmp", "/tmp");
+        assert_eq!(tsi_proj.service_ip("web"), "127.0.0.1");
+    }
+
+    #[test]
+    fn test_parse_k8s_pod_yaml_standard() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fullstack-pod
+  labels:
+    app: fullstack
+spec:
+  restartPolicy: Always
+  volumes:
+    - name: shared-data
+      hostPath:
+        path: /tmp/cro-data
+  containers:
+    - name: backend
+      image: node:20-alpine
+      command: ["node"]
+      args: ["server.js"]
+      ports:
+        - containerPort: 3000
+          hostPort: 3000
+      env:
+        - name: NODE_ENV
+          value: production
+      resources:
+        limits:
+          cpu: "2"
+          memory: "1024Mi"
+      volumeMounts:
+        - name: shared-data
+          mountPath: /data
+      shmSize: "128m"
+    - name: frontend
+      image: nginx:alpine
+      ports:
+        - containerPort: 80
+          hostPort: 8080
+"#;
+
+        let manifest = Manifest::parse(yaml).expect("Failed to parse Kubernetes Pod manifest");
+        let compose = manifest.into_compose_spec();
+
+        assert_eq!(compose.name, Some("fullstack-pod".to_string()));
+        assert_eq!(compose.services.len(), 2);
+
+        let backend = compose.services.get("backend").unwrap();
+        assert_eq!(backend.image, "node:20-alpine");
+        assert_eq!(backend.entrypoint, Some(vec!["node".to_string()]));
+        assert_eq!(backend.cmd, Some(vec!["server.js".to_string()]));
+        assert_eq!(backend.ports, vec!["3000:3000"]);
+        assert_eq!(backend.env.get("NODE_ENV").unwrap(), "production");
+        assert_eq!(backend.cpus, Some(2));
+        assert_eq!(backend.memory, Some("1024Mi".to_string()));
+        assert_eq!(backend.shm_size, Some("128m".to_string()));
+        assert_eq!(backend.volumes, vec!["/tmp/cro-data:/data"]);
+        assert!(backend.depends_on.is_empty());
+
+        let frontend = compose.services.get("frontend").unwrap();
+        assert_eq!(frontend.image, "nginx:alpine");
+        assert_eq!(frontend.ports, vec!["8080:80"]);
+        assert_eq!(frontend.depends_on, vec!["backend".to_string()]);
     }
 }

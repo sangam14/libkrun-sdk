@@ -76,7 +76,11 @@ impl ProxyHttp for PingoraEgressProxy {
     }
 
     /// Fast-path early request inspection and policy verification.
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> pingora::Result<bool> {
+    async fn request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<bool> {
         let req_header = session.req_header();
 
         // Extract target destination from URI or Host header
@@ -105,7 +109,8 @@ impl ProxyHttp for PingoraEgressProxy {
             ctx.blocked = true;
             tracing::warn!(
                 "[PingoraEgress] Blocked unauthorized outbound egress: {}:{}",
-                target_host, target_port
+                target_host,
+                target_port
             );
 
             // Construct Pingora 403 Forbidden downstream response
@@ -117,7 +122,9 @@ impl ProxyHttp for PingoraEgressProxy {
                 target_host, target_port
             );
             session.write_response_header(Box::new(resp), false).await?;
-            session.write_response_body(Some(Bytes::from(body)), true).await?;
+            session
+                .write_response_body(Some(Bytes::from(body)), true)
+                .await?;
 
             // Return true to terminate the request processing in Pingora
             return Ok(true);
@@ -133,7 +140,11 @@ impl ProxyHttp for PingoraEgressProxy {
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
         let peer_addr = format!("{}:{}", ctx.target_host, ctx.target_port);
-        let mut peer = Box::new(HttpPeer::new(peer_addr, ctx.is_tls, ctx.target_host.clone()));
+        let mut peer = Box::new(HttpPeer::new(
+            peer_addr,
+            ctx.is_tls,
+            ctx.target_host.clone(),
+        ));
 
         // Configure connection timeouts and pooling options
         peer.options.connection_timeout = Some(Duration::from_secs(5));
@@ -190,7 +201,9 @@ impl ProxyHttp for PingoraEgressProxy {
                             current, ceiling
                         );
                         // Truncate response chunk to terminate downstream stream
-                        *body = Some(Bytes::from_static(b"\n[ERROR: KRUN_LLM_TOKEN_BUDGET_EXCEEDED]\n"));
+                        *body = Some(Bytes::from_static(
+                            b"\n[ERROR: KRUN_LLM_TOKEN_BUDGET_EXCEEDED]\n",
+                        ));
                     }
                 }
             }
@@ -228,16 +241,20 @@ impl ProxyHttp for PingoraMicroVmGateway {
         None
     }
 
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> pingora::Result<bool> {
+    async fn request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<bool> {
         let path = session.req_header().uri.path();
 
         // Route matching by longest prefix
         let mut matched: Option<&MicroVmServiceBackend> = None;
         for (prefix, backend) in self.routes.iter() {
-            if path.starts_with(prefix) {
-                if matched.is_none() || prefix.len() > matched.unwrap().path_prefix.len() {
-                    matched = Some(backend);
-                }
+            if path.starts_with(prefix)
+                && (matched.is_none() || prefix.len() > matched.unwrap().path_prefix.len())
+            {
+                matched = Some(backend);
             }
         }
 
@@ -249,9 +266,12 @@ impl ProxyHttp for PingoraMicroVmGateway {
             let mut resp = ResponseHeader::build(404, None)?;
             resp.append_header("Content-Type", "application/json")?;
             resp.append_header("X-Gateway", "Pingora-libkrun-microvm")?;
-            let body = r#"{"error":"NotFound","message":"No microVM service route matched request path"}"#;
+            let body =
+                r#"{"error":"NotFound","message":"No microVM service route matched request path"}"#;
             session.write_response_header(Box::new(resp), false).await?;
-            session.write_response_body(Some(Bytes::from(body)), true).await?;
+            session
+                .write_response_body(Some(Bytes::from(body)), true)
+                .await?;
             Ok(true)
         }
     }
@@ -261,11 +281,15 @@ impl ProxyHttp for PingoraMicroVmGateway {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
-        let backend = ctx
-            .as_ref()
-            .ok_or_else(|| pingora::Error::explain(pingora::ErrorType::HTTPStatus(404), "No upstream route"))?;
+        let backend = ctx.as_ref().ok_or_else(|| {
+            pingora::Error::explain(pingora::ErrorType::HTTPStatus(404), "No upstream route")
+        })?;
 
-        let peer = Box::new(HttpPeer::new(backend.target_addr, false, backend.service_name.clone()));
+        let peer = Box::new(HttpPeer::new(
+            backend.target_addr,
+            false,
+            backend.service_name.clone(),
+        ));
         Ok(peer)
     }
 }

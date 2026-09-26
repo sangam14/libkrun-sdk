@@ -98,7 +98,8 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                         port_obj["hostPort"] = serde_json::json!(hp);
                         port_forward_strings.push(format!("{}:{}", hp, p.container_port));
                     } else {
-                        port_forward_strings.push(format!("{}:{}", p.container_port, p.container_port));
+                        port_forward_strings
+                            .push(format!("{}:{}", p.container_port, p.container_port));
                     }
                     if let Some(ref proto) = p.protocol {
                         port_obj["protocol"] = serde_json::json!(proto);
@@ -345,7 +346,8 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                 }]
             });
             if !container_volume_mounts.is_empty() {
-                spec_obj["containers"][0]["volumeMounts"] = serde_json::json!(container_volume_mounts);
+                spec_obj["containers"][0]["volumeMounts"] =
+                    serde_json::json!(container_volume_mounts);
                 spec_obj["volumes"] = serde_json::json!(pod_volumes);
             }
 
@@ -437,7 +439,10 @@ pub async fn reconcile(vm: Arc<MicroVm>, ctx: Arc<ContextData>) -> Result<Action
                     .map(|c| crate::crd::MicroVmCondition {
                         type_: c.type_.clone(),
                         status: c.status.clone(),
-                        last_transition_time: c.last_transition_time.as_ref().map(|t| t.0.to_string()),
+                        last_transition_time: c
+                            .last_transition_time
+                            .as_ref()
+                            .map(|t| t.0.to_string()),
                         reason: c.reason.clone(),
                         message: c.message.clone(),
                     })

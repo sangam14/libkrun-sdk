@@ -57,8 +57,8 @@ PREFIX=""
 
 # --- Usage Banner ---
 print_help() {
-    printf "%b" "${BOLD}libkrun-microvm Installer${NC}
-Automated prerequisite checker, builder, code-signer, and installer for libkrun microVMs.
+    printf "%b" "${BOLD}cro (microvm) Installer${NC}
+Automated prerequisite checker, builder, code-signer, and installer for cro microVMs.
 
 ${BOLD}USAGE:${NC}
     ./install.sh [OPTIONS]
@@ -73,7 +73,7 @@ ${BOLD}OPTIONS:${NC}
     -h, --help           Show this help message and exit
 
 ${BOLD}BINARIES INSTALLED:${NC}
-    - microvm                     Core CLI tool for running OCI images & sandboxes
+    - cro / microvm               Core CLI tool for running OCI images & sandboxes
     - microvm-runner              MicroVM supervisor and init launcher
     - containerd-shim-krun-v2     Containerd v2 runtime shim for Kubernetes
     - krun-operator               Pure-Rust Kubernetes Operator (kube-rs)
@@ -345,11 +345,13 @@ install_bin() {
 }
 
 install_bin "$BIN_CLI" "microvm"
+log_info "Linking cro -> $PREFIX/cro"
+$SUDO_CMD ln -sf microvm "$PREFIX/cro"
 install_bin "$BIN_RUNNER" "microvm-runner"
 install_bin "$BIN_SHIM" "containerd-shim-krun-v2"
 install_bin "$BIN_OPERATOR" "krun-operator"
 
-log_success "All binaries successfully installed to $PREFIX."
+log_success "All binaries successfully installed to $PREFIX (cro & microvm available)."
 
 # ==============================================================================
 # 5. POST-INSTALL VERIFICATION & SYSTEM STATUS

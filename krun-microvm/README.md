@@ -1,13 +1,17 @@
 <div align="center">
 
-# ⚡ krun-microvm
+<img src="assets/logo.png" alt="CroSandbox Logo" width="240" />
+
+# ⚡ CroSandbox (`cro`)
 
 ### The Premier Pure-Rust MicroVM Virtualization & Orchestration Platform
+<p><b>ISOLATE &bull; EXECUTE &bull; CONTROL</b></p>
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/sangam14/libkrun-sdk)
+[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/sangam14/libkrun-sdk)
+[![Tests](https://img.shields.io/badge/tests-134%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
 <p align="center">
@@ -15,7 +19,7 @@
   Sub-100ms cold boot times • Apple Silicon Metal & Linux DRM Venus GPU acceleration • Native Docker Compose orchestration • Zero-trust AI agent sandboxing • Zero CGO & zero runtime overhead.
 </p>
 
-[Quickstart](#-quickstart-in-30-seconds) • [Why libkrun-sdk?](#-why-libkrun-sdk) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architecture--comparison) • [AI Sandboxing](#-ai-agent-sandboxing--gpu) • [Kubernetes](#-kubernetes--containerd-integration) • [Asahi & m1n1](#-asahi-linux--m1n1-boot-integration-apple-silicon) • [SDKs](#-multi-language-client-sdks)
+[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing](#-ai-agent-sandboxing--gpu) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [SDKs](#-multi-language-client-sdks)
 
 ---
 
@@ -23,9 +27,9 @@
 
 ## 🌟 Overview
 
-**krun-microvm** is a modern, high-performance virtualization SDK and microVM orchestration suite powered by [`libkrun`](https://github.com/libkrun/libkrun). Built from the ground up in memory-safe Rust, it transforms ordinary OCI container images (from Docker Hub, GHCR, or local registries) into hardware-isolated virtual machines in **under 100 milliseconds**.
+**cro** is a modern, high-performance virtualization SDK and microVM orchestration suite powered by [`libkrun`](https://github.com/libkrun/libkrun). Built from the ground up in memory-safe Rust, it transforms ordinary OCI container images (from Docker Hub, GHCR, or local registries) into hardware-isolated virtual machines in **under 100 milliseconds**.
 
-Whether you are building **AI coding agent sandboxes** (Claude, Gemini, Codex), running **multi-container microVM stacks with Docker Compose**, deploying **isolated serverless functions**, or orchestrating **Kubernetes Pods with hardware virtualization boundaries**, `krun-microvm` delivers true hypervisor isolation with native developer ergonomics.
+Whether you are building **AI coding agent sandboxes** (Claude, Gemini, Codex), running **multi-container microVM stacks with Docker Compose**, deploying **isolated serverless functions**, or orchestrating **Kubernetes Pods with hardware virtualization boundaries**, `cro` delivers true hypervisor isolation with native developer ergonomics. Both `cro` and `microvm` CLI commands are supported interchangeably.
 
 ---
 
@@ -40,42 +44,60 @@ Whether you are building **AI coding agent sandboxes** (Claude, Gemini, Codex), 
 ### 2. Run Any OCI Container in a MicroVM
 ```bash
 # Boots a hardware-isolated Linux microVM in <100ms:
-microvm run alpine:latest -- echo "🚀 Hello from libkrun microVM!"
+cro run alpine:latest -- echo "🚀 Hello from cro microVM!"
 
 # Check guest Linux kernel (running isolated on macOS Apple Silicon or Linux KVM):
-microvm run alpine:latest -- uname -a
+cro run alpine:latest -- uname -a
 # Linux localhost 6.12.91 #1 SMP aarch64 Linux
 ```
 
 ### 3. Deploy Multi-Service Stacks with Docker Compose
 ```bash
 # Start multi-microVM stack (Redis + Web proxy) in background:
-microvm compose up -f examples/krun-compose.yaml -d
+cro compose up -f examples/krun-compose.yaml -d
 
 # Check live microVM status and port forwards:
-microvm compose ps -f examples/krun-compose.yaml
+cro compose ps -f examples/krun-compose.yaml
 
 # Stream aggregated service logs:
-microvm compose logs -f
+cro compose logs -f
 
 # Gracefully stop and clean up:
-microvm compose down -f examples/krun-compose.yaml
+cro compose down -f examples/krun-compose.yaml
 ```
 
 ### 4. Launch an Isolated AI Coding Agent Sandbox with Git Cherry-Pick
 ```bash
 # Isolated workspace with copy-on-write filesystem, git cherry-pick, and auto-sync:
-microvm sandbox claude \
+cro sandbox claude \
     --workspace . \
     --cherry-pick 7f4a2b1 \
     --apply-to-host \
     --secret ANTHROPIC_API_KEY=env:ANTHROPIC_API_KEY
 
 # Or cherry-pick any past sandbox commits on demand:
-microvm cherry-pick <sandbox-id>
+cro cherry-pick <sandbox-id>
 ```
 
-### 5. Launch the Unstructured Document Intake & AI Threat Shield (`/unstructured`)
+### 5. Build Container Images In-Process (No Docker Daemon Required)
+```bash
+# Build an OCI rootfs directly from a Dockerfile using the native in-process engine:
+cro build -t my-microservice:1.0 -f Dockerfile .
+
+# Instantly run your newly built image with hardware microVM isolation:
+cro run -p 8080:8080 my-microservice:1.0
+```
+
+### 6. Run Production Kubernetes Pods with MicroVM Hardware Isolation (`cro kube play`)
+```bash
+# Launch all containers in a standard Kubernetes Pod manifest (sharing network and volumes):
+cro kube play pod.yaml -d
+
+# Gracefully stop and tear down the Pod:
+cro kube down pod.yaml
+```
+
+### 7. Launch the Unstructured Document Intake & AI Threat Shield (`/unstructured`)
 ```bash
 # Start the Elixir OTP server with Web UI and REST API:
 cd krun-microvm/sdks/elixir && PORT=4005 mix run --no-halt
@@ -86,7 +108,7 @@ open http://localhost:4005/unstructured
 
 ---
 
-## 🚀 Why libkrun-sdk?
+## 🚀 Why CRO?
 
 <table>
 <tr>
@@ -133,16 +155,16 @@ Official containerd v2 TTRPC shim (`containerd-shim-krun-v2`) and pure-Rust `kub
 
 ---
 
-## 📊 Architectural Dominance: libkrun-sdk vs. Alternatives
+## 📊 Architectural Dominance: CRO vs. Alternatives
 
-| Capability | Legacy Docker / runc | AWS Firecracker | Legacy Kata Containers (QEMU) | **`libkrun-sdk` (Pure Rust)** |
+| Capability | Legacy Docker / runc | AWS Firecracker | Legacy Kata Containers (QEMU) | **`cro` (Pure Rust)** |
 |---|:---:|:---:|:---:|:---:|
 | **Isolation Boundary** | OS Namespaces / cgroups | Hardware MicroVM (KVM) | Heavy VM (QEMU) | **Hardware MicroVM (`libkrun`)** |
 | **Apple Silicon (macOS) Support** | ❌ (requires Linux VM) | ❌ (Linux KVM only) | ❌ (Linux only) | **✅ Native (`Hypervisor.framework`)** |
 | **Linux KVM Support** | ✅ | ✅ | ✅ | **✅ Native (`/dev/kvm`)** |
 | **Cold Boot Latency** | ~300ms – 1s | ~250ms – 600ms | ~1500ms – 3000ms | **⚡ Sub-100ms (`<90ms`)** |
 | **Hypervisor Memory Overhead** | ~30 MB – 50 MB | ~50 MB – 80 MB | ~120 MB – 250 MB | **⚡ < 15 MB razor-thin** |
-| **Docker Compose Orchestration** | ✅ (Standard) | ❌ (External tooling) | ❌ | **✅ Native (`microvm compose`)** |
+| **Docker Compose Orchestration** | ✅ (Standard) | ❌ (External tooling) | ❌ | **✅ Native (`cro compose`)** |
 | **GPU / Metal Passthrough** | ❌ (Emulated/None on Mac) | ❌ | Complex VFIO | **✅ Native Metal & DRM Venus** |
 | **VirtioFS DAX (LLM Weights)** | ❌ | ❌ | Complex block setup | **✅ Zero-Copy Shared Memory Window** |
 | **Zero-Trust Egress & Secret Proxy** | ❌ | ❌ (Manual iptables) | ❌ | **✅ Built-in Host Security Proxy** |
@@ -152,7 +174,7 @@ Official containerd v2 TTRPC shim (`containerd-shim-krun-v2`) and pure-Rust `kub
 
 ## 🐳 Declarative Compose & YAML
 
-`libkrun-sdk` provides first-class support for multi-container microVM orchestration via Docker Compose YAML and Kubernetes CRD manifests.
+`cro` provides first-class support for multi-container microVM orchestration via Docker Compose YAML and Kubernetes CRD manifests.
 
 ### 1. Multi-Service MicroVM Spec (`krun-compose.yaml`)
 Define your entire multi-microVM topology with dependencies, CPU/RAM allocations, VirtioFS host mounts, port forwards, and environment variables:
@@ -192,22 +214,22 @@ services:
 ### 2. Compose CLI Commands
 ```bash
 # Start all microVM services in topological order (redis first, then web):
-microvm compose up -d
+cro compose up -d
 
 # Check status of running microVM services:
-microvm compose ps
+cro compose ps
 
 # Follow aggregated logs across all microVMs with service prefixes:
-microvm compose logs -f
+cro compose logs -f
 
 # Validate and inspect resolved configuration:
-microvm compose config
+cro compose config
 
 # Stop and gracefully clean up all microVM instances and networks:
-microvm compose down
+cro compose down
 ```
 
-### 3. Kubernetes Declarative MicroVm CRD (`microvm apply`)
+### 3. Kubernetes Declarative MicroVm CRD (`cro apply`)
 Deploy single-microVM declarative manifests matching Kubernetes `krun.io/v1alpha1` CRD format:
 
 ```yaml
@@ -234,11 +256,104 @@ spec:
 
 ```bash
 # Apply manifest directly with one command:
-microvm apply -f examples/microvm.yaml -d
+cro apply -f examples/microvm.yaml -d
 
 # Or execute with microvm run:
-microvm run -f examples/microvm.yaml -d
+cro run -f examples/microvm.yaml -d
 ```
+
+### 4. Local Kubernetes Pod Parity (`cro kube play` & `cro kube down`)
+
+Run standard, production-grade Kubernetes `v1/Pod` YAML definitions directly on your workstation with hardware microVM isolation—**without running Minikube, Kind, or a heavy local Kubernetes cluster**:
+
+```yaml
+# pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fullstack-pod
+  labels:
+    app: fullstack
+spec:
+  restartPolicy: Always
+  volumes:
+    - name: app-data
+      hostPath:
+        path: /tmp/cro-data
+  containers:
+    - name: backend
+      image: node:20-alpine
+      command: ["node"]
+      args: ["server.js"]
+      ports:
+        - containerPort: 3000
+          hostPort: 3000
+      env:
+        - name: NODE_ENV
+          value: production
+      resources:
+        limits:
+          cpu: "2"
+          memory: "1024Mi"
+      volumeMounts:
+        - name: app-data
+          mountPath: /data
+      shmSize: "256m"
+
+    - name: frontend
+      image: nginx:alpine
+      ports:
+        - containerPort: 80
+          hostPort: 8080
+```
+
+```bash
+# 🚀 Launch the entire Pod (all containers booted in topological order sharing network):
+cro kube play pod.yaml -d
+
+# 📊 Check live status of Pod containers:
+cro compose ps
+
+# 🛑 Gracefully terminate and clean up all Pod microVMs:
+cro kube down pod.yaml
+```
+
+- **Zero-Cluster Overhead**: No kubelet, no etcd, no control plane overhead. Each container runs as an isolated microVM with shared inter-service networking and hostPath volumes.
+- **Spec Fidelity**: Honors `command` (entrypoint), `args` (cmd), `ports` (`containerPort` & `hostPort`), resource requests/limits (`cpu` & `memory`), `env`, `shmSize`, and `volumeMounts`.
+
+---
+
+### 5. Native In-Process Dockerfile Builder (`cro build`)
+
+Build container images locally from standard `Dockerfile` definitions without needing Docker Desktop, Podman, or any background container engine:
+
+```dockerfile
+# Dockerfile
+FROM alpine:3.19 AS builder
+WORKDIR /build
+COPY . .
+RUN echo "Compiling application assets..."
+
+FROM alpine:3.19
+WORKDIR /app
+COPY --from=builder /build/app.sh /app/app.sh
+ENV PORT=8080
+EXPOSE 8080
+CMD ["/app/app.sh"]
+```
+
+```bash
+# 🔨 Build and tag an OCI image directly into the local microVM cache:
+cro build -t myapp:latest -f Dockerfile .
+
+# 🚀 Immediately launch your built image inside a microVM:
+cro run -p 8080:8080 myapp:latest
+```
+
+- **In-Process Engine**: Zero background daemons. Parses Dockerfiles, runs intermediate steps inside hardware-isolated guest sandboxes, and commits the resulting rootfs using instant APFS `clonefile` / Linux `FICLONE`.
+- **Full Directive Support**: Supports `FROM ... AS` (multi-stage builds), `WORKDIR`, `ENV`, `COPY` (with `--from=<stage>`), `ADD`, `RUN`, `CMD`, `ENTRYPOINT`, `EXPOSE`, `USER`, and `LABEL`.
+- **Smart `.dockerignore`**: Automatically filters build contexts respecting standard ignore patterns, wildcards (`**`), and negation (`!`).
+- **Immediate Local Execution**: Locally built images are indexed in `local_images.json` and immediately available to `cro run` without hitting any remote registry.
 
 ---
 
@@ -249,7 +364,7 @@ Safely execute autonomous coding agents (Claude, Gemini, Codex, Dev) without exp
 
 ```bash
 # Run an autonomous coding sandbox with Copy-on-Write host mount:
-microvm sandbox claude \
+cro sandbox claude \
     --workspace /path/to/my-repo \
     --secret ANTHROPIC_API_KEY=env:ANTHROPIC_API_KEY \
     --cpus 4 \
@@ -265,7 +380,7 @@ Test feature branches or pull requests inside a safe microVM without altering yo
 
 ```bash
 # 🍒 1. Cherry-pick a remote or feature commit directly into the isolated sandbox:
-microvm sandbox dev \
+cro sandbox dev \
     --workspace . \
     --cherry-pick 3a7b9c1 \
     --apply-to-host
@@ -274,7 +389,7 @@ microvm sandbox dev \
 # The microVM automatically injects your host git author credentials and enables safe.directory
 
 # 🍒 3. Cherry-pick commits back to host on demand from any historical sandbox:
-microvm cherry-pick <microvm-id> -w .
+cro cherry-pick <microvm-id> -w .
 ```
 
 - **In-Guest Cherry-Pick**: Pulls and cherry-picks target commit inside the isolated container before launching the agent or interactive shell.
@@ -286,18 +401,38 @@ Leverage Apple Silicon Metal or Linux DRM Venus GPU passthrough:
 
 ```bash
 # Boot mistral.rs inside an isolated microVM with Apple Silicon Metal acceleration:
-microvm run \
+cro run \
     --gpu --gpu-shm-size 4G \
     --dax 4G \
     -p 1234:1234 \
     ghcr.io/ericlbuehler/mistral.rs:latest
 ```
 
+### 4. High-Performance AI POSIX Shared Memory (`--shm-size` & `/dev/shm`)
+
+High-performance AI/ML workflows (PyTorch multi-process `DataLoader(num_workers > 0)`, Hugging Face Transformers) and headless Chromium (Playwright / Puppeteer) require dedicated POSIX shared memory. Without it, PyTorch crashes with `RuntimeError: unable to write to /dev/shm`.
+
+`cro` mounts a dedicated `tmpfs` at `/dev/shm` with `mode=1777`:
+
+```bash
+# Allocate 2GB of high-speed POSIX shared memory for PyTorch training:
+cro run \
+    --shm-size 2g \
+    --gpu \
+    --gpu-shm-size 4G \
+    pytorch/pytorch:latest -- python train.py
+
+# Or run headless browser automation without shared memory crashes:
+cro run --shm-size 512m mcr.microsoft.com/playwright:v1.45.0
+```
+
+- **Dual-Layer Hardened Sticky Bits**: Guarantees `/tmp`, `/var/tmp`, and `/dev/shm` maintain world-writable sticky bit permissions (`0o1777`) across both host layer unpacking and guest PID 1 initialization, completely eliminating unprivileged permission traps (`_apt`, `postgres`, `nginx`).
+
 ---
 
 ## 🌐 Advanced MicroVM Networking & Zero-Trust Security
 
-`krun-microvm` provides a versatile, defense-in-depth networking architecture engineered for everything from local rootless development to multi-tenant cloud Kubernetes clusters:
+`cro` provides a versatile, defense-in-depth networking architecture engineered for everything from local rootless development to multi-tenant cloud Kubernetes clusters:
 
 ```mermaid
 graph TD
@@ -349,25 +484,25 @@ graph TD
 
 ---
 
-### 2. First-Class CLI Network Management (`microvm network`)
+### 2. First-Class CLI Network Management (`cro network`)
 
 Manage, inspect, and diagnose microVM networks with dedicated native commands:
 
 ```bash
 # List all active microVM networks, modes, IPs, and port mappings:
-microvm network ls
+cro network ls
 
 # Detailed deep-dive into a microVM's network stack & security rules:
-microvm network inspect <vm-id>
+cro network inspect <vm-id>
 
 # Tabulate active published host-to-guest ports with direct local endpoints:
-microvm network ports
+cro network ports
 
 # Run live in-guest network connectivity, DNS resolution, and egress diagnostic probes:
-microvm network test <vm-id> api.openai.com
+cro network test <vm-id> api.openai.com
 ```
 
-#### Example Output: `microvm network inspect`
+#### Example Output: `cro network inspect`
 ```text
 🌐 MicroVM Network Topology & Security: vm-49fa81
 -----------------------------------------------------------------
@@ -396,7 +531,7 @@ Secure autonomous AI agents, multi-tenant workflows, and untrusted code from exf
 
 ```bash
 # Run with strict default-deny egress (only OpenAI and GitHub permitted):
-microvm run \
+cro run \
     --allow-host api.openai.com:443 \
     --allow-host "*.github.com:443" \
     --secret OPENAI_API_KEY=env:HOST_KEY \
@@ -413,7 +548,7 @@ microvm run \
 
 ### 4. Multi-MicroVM Compose Networking & Service Discovery
 
-Services deployed with `microvm compose` automatically receive inter-service DNS discovery:
+Services deployed with `cro compose` automatically receive inter-service DNS discovery:
 
 ```yaml
 # krun-compose.yaml
@@ -442,22 +577,22 @@ services:
 
 ### 5. Cloudflare Pingora L7 Reverse Proxy Gateway & Zero-Trust Egress
 
-Integrated directly with [Cloudflare Pingora](https://github.com/cloudflare/pingora) (`0.9.0`), `libkrun-sdk` provides an ultra-low-latency, pure-Rust multi-threaded L7 reverse proxy and ingress/egress gateway:
+Integrated directly with [Cloudflare Pingora](https://github.com/cloudflare/pingora) (`0.9.0`), `cro` provides an ultra-low-latency, pure-Rust multi-threaded L7 reverse proxy and ingress/egress gateway:
 
-- **L7 Ingress Routing & Dynamic Service Load Balancing**: Route external HTTP/HTTPS traffic to microVM and Compose backends via longest prefix matching with connection pooling and keep-alive reuse (`microvm network pingora --listen 127.0.0.1:8080 --route /api=127.0.0.1:3000 --route /web=127.0.0.1:8000`).
+- **L7 Ingress Routing & Dynamic Service Load Balancing**: Route external HTTP/HTTPS traffic to microVM and Compose backends via longest prefix matching with connection pooling and keep-alive reuse (`cro network pingora --listen 127.0.0.1:8080 --route /api=127.0.0.1:3000 --route /web=127.0.0.1:8000`).
 - **Zero-Trust Egress Defense**: High-throughput egress proxy with strict default-deny domain allowlisting, wildcard domain matching (`*.openai.com`), and automatic blocking of cloud metadata service SSRF (`169.254.169.254`).
 - **In-Flight Secret Substitution**: Replaces sensitive placeholders (`krun-secret:KEY`) on egress requests with actual secrets directly in Pingora filters before forwarding upstream.
 - **Streaming LLM Token Budgeting**: Inspects downstream response chunks to calculate token expenditures and enforce hard token ceilings in real time.
 
 ```bash
 # Launch a Cloudflare Pingora L7 Reverse Proxy Gateway for MicroVM services:
-microvm network pingora \
+cro network pingora \
     --listen 127.0.0.1:8080 \
     --route /api=127.0.0.1:3000 \
     --route /web=127.0.0.1:8000
 
 # Launch a Cloudflare Pingora Zero-Trust Egress Proxy with domain allowlisting:
-microvm network pingora \
+cro network pingora \
     --listen 127.0.0.1:8080 \
     --egress \
     --allow-host api.openai.com:443 \
@@ -468,7 +603,7 @@ microvm network pingora \
 
 ### 6. Unstructured Document Intake & AI Threat Shield (`/unstructured` & Elixir SDK)
 
-`libkrun-sdk` provides an end-to-end **Hardware-Isolated Document Ingestion & AI Threat Shield** accessible via an interactive Cyber-Obsidian Web UI at route **`/unstructured`** and an official **Elixir SDK (`Krun.Unstructured`)**.
+`cro` provides an end-to-end **Hardware-Isolated Document Ingestion & AI Threat Shield** accessible via an interactive Cyber-Obsidian Web UI at route **`/unstructured`** and an official **Elixir SDK (`Krun.Unstructured`)**.
 
 #### Why `libkrun Sieve` is Superior to Static Scanners (e.g. Sieve)
 - **True Hardware Virtualization**: Executes untrusted document parsing inside an ephemeral Apple Silicon Hypervisor / Linux KVM container booted in **< 75ms** (instead of relying solely on brittle regexes).
@@ -512,7 +647,7 @@ PORT=4005 mix run --no-halt
 
 ## 🍎 Asahi Linux & m1n1 Boot Integration (Apple Silicon)
 
-`libkrun-sdk` provides native support for booting **Asahi Linux kernels** (`vmlinuz-asahi`, `Image.gz`) and **m1n1 payloads** (`m1n1.bin`, `m1n1.elf`) on Apple Silicon (M1/M2/M3/M4).
+`cro` provides native support for booting **Asahi Linux kernels** (`vmlinuz-asahi`, `Image.gz`) and **m1n1 payloads** (`m1n1.bin`, `m1n1.elf`) on Apple Silicon (M1/M2/M3/M4).
 
 ```
                +-------------------------------------------------------+
@@ -540,21 +675,21 @@ PORT=4005 mix run --no-halt
 ```
 
 ### 1. Understanding m1n1 & Asahi Linux Payloads
-- **m1n1**: Developed by the Asahi Linux team, `m1n1` serves as the stage 1 and stage 2 bootloader and hypervisor on Apple Silicon. In `libkrun-sdk`, raw `m1n1.bin` payloads can be booted directly with `--kernel-format raw` (`KRUN_KERNEL_FORMAT_RAW`), making `libkrun-sdk` an ideal testbed for low-level Apple Silicon kernel development, hypervisor experimentation, and hardware tracing without risking host instability.
-- **Asahi Linux Compressed Kernels (`Image.gz` / `vmlinuz-asahi`)**: Standard Asahi Linux distribution kernels are gzip-compressed ARM64 image binaries (`0x1f, 0x8b`). `libkrun-sdk` automatically inspects the magic bytes and sets `KRUN_KERNEL_FORMAT_IMAGE_GZ`, or allows explicit control via `--kernel-format gz`.
+- **m1n1**: Developed by the Asahi Linux team, `m1n1` serves as the stage 1 and stage 2 bootloader and hypervisor on Apple Silicon. In `cro`, raw `m1n1.bin` payloads can be booted directly with `--kernel-format raw` (`KRUN_KERNEL_FORMAT_RAW`), making `cro` an ideal testbed for low-level Apple Silicon kernel development, hypervisor experimentation, and hardware tracing without risking host instability.
+- **Asahi Linux Compressed Kernels (`Image.gz` / `vmlinuz-asahi`)**: Standard Asahi Linux distribution kernels are gzip-compressed ARM64 image binaries (`0x1f, 0x8b`). `cro` automatically inspects the magic bytes and sets `KRUN_KERNEL_FORMAT_IMAGE_GZ`, or allows explicit control via `--kernel-format gz`.
 
 ### 2. The 16KB Host vs. 4KB Guest Page Size Problem (Why `muvm` uses `libkrun`)
 Apple Silicon hardware operates at **16KB memory page sizes** under both macOS and Asahi Linux to maximize memory bandwidth and TLB hit rates. However:
 - The entire x86/x86_64 software ecosystem, including Windows applications, Steam games, and user-space binaries, is hardcoded to **4KB page sizes**.
 - Running x86 dynamic translators like **FEX-Emu**, **Box64**, and **Wine / Proton** directly on a 16KB host causes memory corruption, misaligned memory-mapped files, and frequent application crashes.
 - **The Solution**: The Asahi Linux project created **`muvm`**, which leverages **`libkrun`** to spin up lightweight Linux microVMs running a **4KB guest kernel** on top of the 16KB Apple Silicon host.
-- `libkrun-sdk` brings this exact architecture to developers and engineers with zero-config OCI containers, direct kernel loading, and virtio-gpu passthrough.
+- `cro` brings this exact architecture to developers and engineers with zero-config OCI containers, direct kernel loading, and virtio-gpu passthrough.
 
 ### 3. Direct Boot CLI Examples
 
 ```bash
 # 🍏 1. Boot compressed Asahi Linux ARM64 kernel with rootfs disk and virtio-gpu:
-microvm run \
+cro run \
     --kernel /boot/vmlinuz-asahi \
     --kernel-format gz \
     --initrd /boot/initramfs-linux.img \
@@ -564,14 +699,14 @@ microvm run \
     -c 4 -m 4096
 
 # 🍎 2. Boot m1n1 stage 1/2 raw payload directly:
-microvm run \
+cro run \
     --kernel /usr/lib/asahi-boot/m1n1.bin \
     --kernel-format raw \
     --cmdline "console=ttyAMA0 earlycon" \
     -c 4 -m 2048
 
 # 🚀 3. Run 4KB-page emulation container with declarative manifest:
-microvm run -f examples/asahi-microvm.yaml -d
+cro run -f examples/asahi-microvm.yaml -d
 ```
 
 ### 4. Supported Kernel Formats
@@ -596,92 +731,92 @@ microvm run -f examples/asahi-microvm.yaml -d
 ### Lifecycle & Execution
 ```bash
 # Run interactive container shell:
-microvm run -it alpine:latest -- sh
+cro run -it alpine:latest -- sh
 
 # Run detached in background (prints container ID):
-microvm run -d alpine:latest -- sleep 300
+cro run -d alpine:latest -- sleep 300
 
 # Mount host directories via VirtioFS:
-microvm run -v /Users/apple/data:data alpine:latest -- ls -la /data
+cro run -v /Users/apple/data:data alpine:latest -- ls -la /data
 
 # Forward ports (host:guest):
-microvm run -p 8080:80 nginx:alpine
+cro run -p 8080:80 nginx:alpine
 
 # Stream microVM console logs:
-microvm logs -f <vm-id>
+cro logs -f <vm-id>
 
 # Copy files between host and microVM:
-microvm cp ./app.py <vm-id>:/root/app.py
-microvm cp <vm-id>:/root/output.log ./output.log
+cro cp ./app.py <vm-id>:/root/app.py
+cro cp <vm-id>:/root/output.log ./output.log
 
 # Execute command inside a running microVM:
-microvm exec <vm-id> -- cat /etc/os-release
+cro exec <vm-id> -- cat /etc/os-release
 ```
 
 ### State, Monitoring & Telemetry
 ```bash
 # List all microVMs:
-microvm ps -a
+cro ps -a
 
 # Live interactive CPU, memory, and thread stats dashboard:
-microvm stats
+cro stats
 
 # Single-shot telemetry JSON for monitoring tools:
-microvm stats --no-stream --json
+cro stats --no-stream --json
 
 # Pause and resume execution:
-microvm pause <vm-id>
-microvm resume <vm-id>
+cro pause <vm-id>
+cro resume <vm-id>
 
 # Dynamically resize CPU and memory of a running microVM without reboot:
-microvm resize <vm-id> --cpus 4 --memory 2048
+cro resize <vm-id> --cpus 4 --memory 2048
 
 # Prometheus metrics scrape endpoint:
-microvm metrics --listen 0.0.0.0:9090
+cro metrics --listen 0.0.0.0:9090
 
 # Stop and remove:
-microvm stop <vm-id>
-microvm rm -f <vm-id>
-microvm prune
+cro stop <vm-id>
+cro rm -f <vm-id>
+cro prune
 ```
 
 ### Universal Multi-Boot Engines (Linux, Asahi, m1n1, UEFI & Unikernels)
 ```bash
 # Direct compressed Asahi Linux ARM64 kernel boot (auto-detect or explicit format):
-microvm run --kernel /boot/vmlinuz-asahi --kernel-format gz --initrd /boot/initrd.img --cmdline "console=ttyAMA0 earlycon" --disk rootfs.raw
+cro run --kernel /boot/vmlinuz-asahi --kernel-format gz --initrd /boot/initrd.img --cmdline "console=ttyAMA0 earlycon" --disk rootfs.raw
 
 # Direct m1n1 stage 1/2 raw payload boot on Apple Silicon:
-microvm run --kernel /usr/lib/asahi-boot/m1n1.bin --kernel-format raw --cmdline "console=ttyAMA0 earlycon" -c 4 -m 2048
+cro run --kernel /usr/lib/asahi-boot/m1n1.bin --kernel-format raw --cmdline "console=ttyAMA0 earlycon" -c 4 -m 2048
 
 # Direct standard Linux kernel boot with initrd and cmdline:
-microvm run --kernel /boot/vmlinuz --initrd /boot/initrd.img --cmdline "console=ttyS0" --disk rootfs.raw
+cro run --kernel /boot/vmlinuz --initrd /boot/initrd.img --cmdline "console=ttyS0" --disk rootfs.raw
 
 # UEFI firmware boot (EDK2 / KRUN_EFI.fd):
-microvm run --firmware /usr/share/edk2/aarch64/QEMU_EFI.fd --disk os.img
+cro run --firmware /usr/share/edk2/aarch64/QEMU_EFI.fd --disk os.img
 
 # Boot unikernels (Unikraft, Nanos, OSv):
-microvm unikernel app.unikraft -c 2 -m 512 --cmdline "netdev.ipv4_addr=192.168.1.2"
+cro unikernel app.unikraft -c 2 -m 512 --cmdline "netdev.ipv4_addr=192.168.1.2"
 ```
 
 ### Virtual Networking & Egress Security
 ```bash
 # List all microVM virtual networks, driver modes, IPs, and port forwards:
-microvm network ls
-microvm network ls --json
+cro network ls
+cro network ls --json
 
 # Deep inspect network configuration, MAC, DNS, and firewall policies:
-microvm network inspect <vm-id>
+cro network inspect <vm-id>
 
 # View published port forwards across all running microVMs:
-microvm network ports
-microvm network ports <vm-id>
+cro network ports
+cro network ports <vm-id>
 
 # Run live connectivity, DNS resolution, and egress diagnostic probes:
-microvm network test <vm-id> api.openai.com
-microvm network test <vm-id> 1.1.1.1
+cro network test <vm-id> api.openai.com
+cro network test <vm-id> 1.1.1.1
 
 # Launch microVM with custom network mode, MAC address, and jumbo frames:
-microvm run --net gvproxy --mac 5a:94:ef:e4:0c:ee --mtu 9000 alpine:latest
+cro run --net gvproxy --mac 5a:94:ef:e4:0c:ee --mtu 9000 alpine:latest
 ```
 
 </details>
@@ -690,7 +825,7 @@ microvm run --net gvproxy --mac 5a:94:ef:e4:0c:ee --mtu 9000 alpine:latest
 
 ## 💻 Multi-Language Client SDKs
 
-`libkrun-sdk` provides first-class client SDKs across **Python**, **TypeScript/Node**, **Rust**, and **Go**:
+`cro` provides first-class client SDKs across **Python**, **TypeScript/Node**, **Rust**, and **Go**:
 
 <details>
 <summary><b>🐍 Python SDK (Serverless <code>@task</code> decorator)</b></summary>
@@ -770,7 +905,7 @@ import (
     "context"
     "fmt"
     "log"
-    "github.com/sangam14/libkrun-sdk/sdk/go"
+    "github.com/CroSandbox/cro/sdk/go"
 )
 
 func main() {
@@ -796,11 +931,11 @@ func main() {
 
 ## ☸️ Kubernetes & containerd Integration
 
-`libkrun-sdk` includes an official containerd v2 runtime shim (`containerd-shim-krun-v2`) and a pure-Rust `kube-rs` Operator:
+`cro` includes an official containerd v2 runtime shim (`containerd-shim-krun-v2`) and a pure-Rust `kube-rs` Operator:
 
 ```bash
 # 1. Install containerd runtime shim:
-microvm containerd install
+cro containerd install
 
 # 2. Register RuntimeClass in Kubernetes:
 kubectl apply -f k8s/runtimeclass.yaml
@@ -822,12 +957,55 @@ EOF
 
 ---
 
+## 💻 Complete CLI Command Reference
+
+`cro` and `microvm` commands can be used interchangeably:
+
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| **`run`** | `cro run [OPTIONS] <IMAGE> [-- <CMD>...]` | Run an OCI container image, direct kernel, or firmware as a hardware-isolated microVM |
+| **`build`** | `cro build -t <tag> [-f <Dockerfile>] [context]` | Build an OCI image from a Dockerfile using the native in-process engine (no daemon) |
+| **`kube play`** | `cro kube play <pod.yaml> [-d]` | Play/launch all containers defined in a Kubernetes `v1/Pod` YAML manifest |
+| **`kube down`** | `cro kube down <pod.yaml>` | Stop and tear down all containers in a Kubernetes Pod manifest |
+| **`compose up`** | `cro compose up -f <compose.yaml> [-d]` | Orchestrate multi-service microVM stacks with dependency ordering |
+| **`compose ps`** | `cro compose ps -f <compose.yaml>` | List status and ports of running compose services |
+| **`compose logs`** | `cro compose logs -f` | Stream unified, aggregated logs across all microVM services |
+| **`compose down`** | `cro compose down -f <compose.yaml>` | Gracefully stop and clean up all compose microVM instances |
+| **`apply`** | `cro apply -f <manifest.yaml> [-d]` | Apply any YAML manifest (Compose, Kubernetes MicroVm CRD, or Pod) |
+| **`sandbox`** | `cro sandbox <agent> -w <dir> [--cherry-pick <sha>]` | Launch an AI coding agent (Claude, Gemini, Dev) with CoW workspace & secret masking |
+| **`cherry-pick`**| `cro cherry-pick <vm-id> -w <host-dir>` | Cherry-pick commits made in an isolated sandbox back to host git repository |
+| **`exec`** | `cro exec [OPTIONS] <ID> <CMD>...` | Execute interactive or batch commands inside a live microVM via vsock |
+| **`ps`** | `cro ps [-a]` | List running, paused, and recent microVM instances |
+| **`stop`** | `cro stop <ID>` | Gracefully stop a running microVM |
+| **`pause`** | `cro pause <ID>` | Pause all vCPUs of a running microVM |
+| **`resume`** | `cro resume <ID>` | Resume execution of a paused microVM |
+| **`rm`** | `cro rm [-f] <ID>...` | Remove stopped microVM instances and release storage |
+| **`inspect`** | `cro inspect <ID>` | Display low-level configuration, network topology, and runtime state |
+| **`stats`** | `cro stats [<ID>]` | Live resource telemetry (CPU %, RSS memory, vCPUs, PID) |
+| **`top`** | `cro top <ID>` | Display supervisor and thread statistics of a microVM |
+| **`cp`** | `cro cp <src> <dest>` | Copy files and directories bidirectionally between host and microVM |
+| **`logs`** | `cro logs [-f] <ID>` | View and follow console output of a microVM |
+| **`snapshot`** | `cro snapshot <ID> [-o <out>]` | Capture an instant CoW snapshot of a live microVM |
+| **`restore`** | `cro restore <snapshot>` | Restore a microVM from a snapshot for instant warm-start |
+| **`resize`** | `cro resize <ID> -c <cpus> -m <mb>` | Dynamically hot-plug CPU and memory resources of a live microVM |
+| **`network ls`** | `cro network ls` | List active microVM network configurations, interfaces, and IPs |
+| **`network inspect`**| `cro network inspect <ID>` | Inspect virtual network topology, DNS, egress rules, and proxy servers |
+| **`network pingora`**| `cro network pingora --listen <addr>` | Start a Cloudflare Pingora L7 gateway or zero-trust egress proxy |
+| **`metrics`** | `cro metrics [--listen <addr>]` | Export Prometheus metrics or serve live Prometheus scrape endpoint |
+| **`artifact`** | `cro artifact pull / list` | Manage detached OCI artifacts (LLM weights, datasets, toolchains) |
+| **`containerd`**| `cro containerd install` | Install containerd v2 runtime shim (`containerd-shim-krun-v2`) |
+| **`preflight`** | `cro preflight` | Run hypervisor preflight checks (macOS Hypervisor.framework / Linux KVM) |
+| **`info`** | `cro info` | Display host hypervisor capabilities, cache size, and system state |
+| **`prune`** | `cro prune` | Clean up stopped microVM instances and dangling cache directories |
+
+---
+
 ## 🏗️ Building from Source
 
 ```bash
 # Clone with submodules:
-git clone --recurse-submodules https://github.com/sangam14/libkrun-sdk.git
-cd libkrun-sdk
+git clone --recurse-submodules https://github.com/CroSandbox/cro.git
+cd cro
 
 # Build all workspace binaries:
 make build
@@ -835,7 +1013,7 @@ make build
 # Sign binaries with macOS Hypervisor entitlement:
 make sign
 
-# Run all 105 automated unit and integration tests:
+# Run all 134 automated unit and integration tests:
 make test
 ```
 
@@ -857,6 +1035,6 @@ This project is licensed under the **Apache License 2.0**. See the [LICENSE](LIC
 
 <div align="center">
 
-**If you find `krun-microvm` useful, please give us a ⭐ on GitHub! It helps the project grow.**
+**If you find `cro` useful, please give us a ⭐ on GitHub! It helps the project grow.**
 
 </div>

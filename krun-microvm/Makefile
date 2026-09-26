@@ -50,10 +50,11 @@ install: release
 	@echo "Installing binaries to $(PREFIX)..."
 	$(SUDO) install -d "$(PREFIX)"
 	$(SUDO) install -m 755 target/release/microvm "$(PREFIX)/microvm"
+	$(SUDO) ln -sf microvm "$(PREFIX)/cro"
 	$(SUDO) install -m 755 target/release/microvm-runner "$(PREFIX)/microvm-runner"
 	$(SUDO) install -m 755 target/release/containerd-shim-krun-v2 "$(PREFIX)/containerd-shim-krun-v2"
 	$(SUDO) install -m 755 target/release/krun-operator "$(PREFIX)/krun-operator"
-	@echo "All binaries successfully installed to $(PREFIX)"
+	@echo "All binaries successfully installed to $(PREFIX) (cro & microvm available)"
 
 preflight:
 	@if [ -f target/release/microvm ]; then \

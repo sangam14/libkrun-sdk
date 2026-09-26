@@ -72,6 +72,7 @@ pub struct MicroVmBuilder {
     mac_address: Option<String>,
     mtu: Option<usize>,
     extra_hosts: Vec<(String, String)>,
+    shm_size: Option<String>,
 }
 
 impl MicroVmBuilder {
@@ -119,6 +120,7 @@ impl MicroVmBuilder {
             mac_address: None,
             mtu: None,
             extra_hosts: Vec::new(),
+            shm_size: None,
         }
     }
 
@@ -172,12 +174,10 @@ impl MicroVmBuilder {
             builder = builder.network_mode(crate::net::NetworkMode::Gvproxy);
         }
 
-        if let Some(allow_str) = bundle
-            .spec
-            .annotations()
-            .as_ref()
-            .and_then(|a| a.get("krun.network.allow").or_else(|| a.get("krun.io/allow-egress")))
-        {
+        if let Some(allow_str) = bundle.spec.annotations().as_ref().and_then(|a| {
+            a.get("krun.network.allow")
+                .or_else(|| a.get("krun.io/allow-egress"))
+        }) {
             for target in allow_str.split(',') {
                 let trimmed = target.trim();
                 if !trimmed.is_empty() {
@@ -194,7 +194,10 @@ impl MicroVmBuilder {
                     builder = builder.gpu(true);
                 }
             }
-            if let Some(dax_str) = ann.get("krun.dax").or_else(|| ann.get("krun.io/dax-window-size")) {
+            if let Some(dax_str) = ann
+                .get("krun.dax")
+                .or_else(|| ann.get("krun.io/dax-window-size"))
+            {
                 if dax_str == "true" || dax_str == "1" {
                     builder = builder.dax_window_size(2 * 1024 * 1024 * 1024);
                 } else if !dax_str.is_empty() && dax_str != "false" {
@@ -203,7 +206,10 @@ impl MicroVmBuilder {
                     }
                 }
             }
-            if let Some(sb_str) = ann.get("krun.sandbox").or_else(|| ann.get("krun.io/sandbox")) {
+            if let Some(sb_str) = ann
+                .get("krun.sandbox")
+                .or_else(|| ann.get("krun.io/sandbox"))
+            {
                 if sb_str == "false" || sb_str == "0" {
                     builder = builder.sandbox(false);
                 }
@@ -450,6 +456,12 @@ impl MicroVmBuilder {
     /// Enables or disables zero-trust host sandboxing (Landlock LSM and Seccomp syscall filtering on Linux).
     pub fn sandbox(mut self, enabled: bool) -> Self {
         self.sandbox = enabled;
+        self
+    }
+
+    /// Configures the size of POSIX shared memory (/dev/shm) mounted inside the guest (e.g. "64m", "512m", "2g").
+    pub fn shm_size(mut self, size: impl Into<String>) -> Self {
+        self.shm_size = Some(size.into());
         self
     }
 
@@ -746,13 +758,42 @@ impl MicroVmBuilder {
                 }
             }
 
-            if self.network_mode.is_gvproxy() && !final_cmd.is_empty() {
-                let init_script = r#"#!/bin/sh
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-ip link set eth0 up 2>/dev/null || true
-(udhcpc -i eth0 -q -n -t 2 || (ip addr add 192.168.127.2/24 dev eth0 && ip route add default via 192.168.127.1)) 2>/dev/null || true
-exec "$@"
-"#;
+            // 3c. Guarantee enterprise /tmp & /var/tmp sticky permissions (0o1777)
+            for tmp_rel in &["tmp", "var/tmp"] {
+                let p = instance_rootfs.join(tmp_rel);
+                let _ = fs::create_dir_all(&p);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o1777));
+                }
+            }
+
+            if !final_cmd.is_empty() {
+                let shm_sz = self.shm_size.as_deref().unwrap_or("64m");
+                let mut init_lines = Vec::new();
+                init_lines.push("#!/bin/sh".to_string());
+                init_lines.push(
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+                        .to_string(),
+                );
+                // Enterprise runtime hardening: sticky bit on /tmp & /var/tmp to prevent EACCES for unprivileged service users
+                init_lines.push("chmod 1777 /tmp /var/tmp 2>/dev/null || true".to_string());
+                // POSIX shared memory (/dev/shm) for PyTorch, Chromium, PostgreSQL
+                init_lines.push("mkdir -p /dev/shm 2>/dev/null || true".to_string());
+                init_lines.push(format!(
+                    "mount -t tmpfs -o rw,nosuid,nodev,mode=1777,size={shm_sz} tmpfs /dev/shm 2>/dev/null || true"
+                ));
+
+                if self.network_mode.is_gvproxy() {
+                    init_lines.push("ip link set eth0 up 2>/dev/null || true".to_string());
+                    init_lines.push("(udhcpc -i eth0 -q -n -t 2 || (ip addr add 192.168.127.2/24 dev eth0 && ip route add default via 192.168.127.1)) 2>/dev/null || true".to_string());
+                }
+
+                init_lines.push("exec \"$@\"".to_string());
+                init_lines.push("".to_string());
+
+                let init_script = init_lines.join("\n");
                 let script_path = instance_rootfs.join("krun-init.sh");
                 let _ = std::fs::write(&script_path, init_script);
                 #[cfg(unix)]
@@ -1039,6 +1080,10 @@ exec "$@"
             }
             cmd.stdout(std::process::Stdio::inherit());
             cmd.stderr(std::process::Stdio::inherit());
+        }
+
+        if !self.detach {
+            cmd.kill_on_drop(true);
         }
 
         let raw_guard = if self.tty && !self.detach {
@@ -1400,6 +1445,20 @@ impl MicroVm {
             return;
         }
         self.purge();
+    }
+}
+
+impl Drop for MicroVm {
+    fn drop(&mut self) {
+        if !self.is_detached {
+            if let Ok(None) = self.child.try_wait() {
+                if let Some(pid) = self.child.id() {
+                    let nix_pid = Pid::from_raw(pid as i32);
+                    let _ = signal::kill(nix_pid, Signal::SIGKILL);
+                }
+            }
+            self.cleanup();
+        }
     }
 }
 
@@ -1797,8 +1856,14 @@ mod tests {
             assert_eq!(parse_kernel_format("m1n1"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
             assert_eq!(parse_kernel_format("bin"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
             assert_eq!(parse_kernel_format("gz"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
-            assert_eq!(parse_kernel_format("image.gz"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
-            assert_eq!(parse_kernel_format("vmlinuz"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
+            assert_eq!(
+                parse_kernel_format("image.gz"),
+                Some(KRUN_KERNEL_FORMAT_PE_GZ)
+            );
+            assert_eq!(
+                parse_kernel_format("vmlinuz"),
+                Some(KRUN_KERNEL_FORMAT_PE_GZ)
+            );
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
@@ -1806,13 +1871,25 @@ mod tests {
             assert_eq!(parse_kernel_format("m1n1"), Some(KRUN_KERNEL_FORMAT_RAW));
             assert_eq!(parse_kernel_format("bin"), Some(KRUN_KERNEL_FORMAT_RAW));
             assert_eq!(parse_kernel_format("gz"), Some(KRUN_KERNEL_FORMAT_IMAGE_GZ));
-            assert_eq!(parse_kernel_format("image.gz"), Some(KRUN_KERNEL_FORMAT_IMAGE_GZ));
-            assert_eq!(parse_kernel_format("vmlinuz"), Some(KRUN_KERNEL_FORMAT_IMAGE_GZ));
+            assert_eq!(
+                parse_kernel_format("image.gz"),
+                Some(KRUN_KERNEL_FORMAT_IMAGE_GZ)
+            );
+            assert_eq!(
+                parse_kernel_format("vmlinuz"),
+                Some(KRUN_KERNEL_FORMAT_IMAGE_GZ)
+            );
         }
         assert_eq!(parse_kernel_format("elf"), Some(KRUN_KERNEL_FORMAT_ELF));
         assert_eq!(parse_kernel_format("vmlinux"), Some(KRUN_KERNEL_FORMAT_ELF));
-        assert_eq!(parse_kernel_format("bz2"), Some(KRUN_KERNEL_FORMAT_IMAGE_BZ2));
-        assert_eq!(parse_kernel_format("zstd"), Some(KRUN_KERNEL_FORMAT_IMAGE_ZSTD));
+        assert_eq!(
+            parse_kernel_format("bz2"),
+            Some(KRUN_KERNEL_FORMAT_IMAGE_BZ2)
+        );
+        assert_eq!(
+            parse_kernel_format("zstd"),
+            Some(KRUN_KERNEL_FORMAT_IMAGE_ZSTD)
+        );
         assert_eq!(parse_kernel_format("pe"), Some(KRUN_KERNEL_FORMAT_PE_GZ));
         assert_eq!(parse_kernel_format("unknown_format"), None);
     }
@@ -1845,7 +1922,10 @@ mod tests {
         let mut zstd_file = std::fs::File::create(&zstd_path).unwrap();
         zstd_file.write_all(&[0x28, 0xb5, 0x2f, 0xfd]).unwrap();
         drop(zstd_file);
-        assert_eq!(detect_kernel_format(&zstd_path), KRUN_KERNEL_FORMAT_IMAGE_ZSTD);
+        assert_eq!(
+            detect_kernel_format(&zstd_path),
+            KRUN_KERNEL_FORMAT_IMAGE_ZSTD
+        );
 
         // 4. Filename extension fallback for m1n1.bin
         let m1n1_path = dir.path().join("m1n1.bin");
@@ -1859,8 +1939,59 @@ mod tests {
         let vmlinuz_path = dir.path().join("vmlinuz-6.8.0-asahi");
         std::fs::File::create(&vmlinuz_path).unwrap();
         #[cfg(target_arch = "aarch64")]
-        assert_eq!(detect_kernel_format(&vmlinuz_path), KRUN_KERNEL_FORMAT_PE_GZ);
+        assert_eq!(
+            detect_kernel_format(&vmlinuz_path),
+            KRUN_KERNEL_FORMAT_PE_GZ
+        );
         #[cfg(not(target_arch = "aarch64"))]
-        assert_eq!(detect_kernel_format(&vmlinuz_path), KRUN_KERNEL_FORMAT_IMAGE_GZ);
+        assert_eq!(
+            detect_kernel_format(&vmlinuz_path),
+            KRUN_KERNEL_FORMAT_IMAGE_GZ
+        );
+    }
+
+    #[tokio::test]
+    async fn test_microvm_drop_cleanup_non_detached() {
+        let dir = tempfile::tempdir().unwrap();
+        let instance_dir = dir.path().join("instances/test-vm-drop");
+        std::fs::create_dir_all(&instance_dir).unwrap();
+        let test_file = instance_dir.join("marker.txt");
+        std::fs::write(&test_file, "data").unwrap();
+
+        let child = tokio::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        let vm = MicroVm {
+            id: "test-vm-drop".to_string(),
+            child,
+            instance_dir: instance_dir.clone(),
+            data_dir: dir.path().to_path_buf(),
+            is_detached: false,
+            supervisor_sock: instance_dir.join("supervisor.sock"),
+            _raw_guard: None,
+            _proxy: None,
+            _gvproxy: None,
+        };
+
+        // When vm is dropped, it should terminate the process and cleanup instance_dir
+        drop(vm);
+
+        // Instance directory should be removed
+        assert!(!instance_dir.exists());
+
+        // Process should be terminated
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let nix_pid = Pid::from_raw(pid as i32);
+        let alive = signal::kill(nix_pid, None).is_ok();
+        assert!(!alive);
+    }
+
+    #[test]
+    fn test_builder_shm_size_config() {
+        let builder = MicroVmBuilder::new("alpine:latest").shm_size("2g");
+        assert_eq!(builder.shm_size.as_deref(), Some("2g"));
     }
 }

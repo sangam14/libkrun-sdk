@@ -1,4 +1,5 @@
 pub mod acceleration;
+pub mod builder;
 pub mod bundle;
 pub mod compose;
 pub mod config;
@@ -15,6 +16,10 @@ pub mod types;
 pub mod vm;
 
 pub use acceleration::{AccelerationFormat, ImageAcceleration};
+pub use builder::{
+    try_fetch_local_tag, BuildEngine, BuildOptions, BuildResult, Dockerfile, Dockerignore,
+    Instruction, LocalImageRecord, LocalImageRegistry,
+};
 pub use bundle::OciBundle;
 pub use compose::{
     ComposeNetworkSpec, ComposeProject, ComposeProjectState, ComposeServiceState, ComposeSpec,
@@ -25,10 +30,10 @@ pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};
 pub use metrics::{collect_process_stats, export_prometheus_metrics, ProcessStats};
 pub use net::{
-    create_pingora_egress_service, create_pingora_gateway_service, DnsConfig, EgressPolicy,
-    EgressProxyServer, LlmTokenBudget, MicroVmServiceBackend, NetworkMode, PingoraEgressProxy,
-    PingoraMicroVmGateway, PingoraRequestContext, run_pingora_egress_server,
-    run_pingora_gateway_server, SecretSubstitution,
+    create_pingora_egress_service, create_pingora_gateway_service, run_pingora_egress_server,
+    run_pingora_gateway_server, DnsConfig, EgressPolicy, EgressProxyServer, LlmTokenBudget,
+    MicroVmServiceBackend, NetworkMode, PingoraEgressProxy, PingoraMicroVmGateway,
+    PingoraRequestContext, SecretSubstitution,
 };
 pub use oci::{ArtifactMetadata, ImageReference, OciArtifact, OciClient, OciLayout};
 pub use preflight::{CheckResult, Preflight};

@@ -116,5 +116,65 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
         }
     }
 
+    // Invariant: Guarantee /tmp and /var/tmp exist with world-writable sticky permissions (0o1777)
+    // to prevent host umask stripping from causing EACCES when container processes drop privileges.
+    ensure_tmp_sticky_bit(root_dir)?;
+
     Ok(())
+}
+
+/// Invariant: Guarantee /tmp and /var/tmp exist with world-writable sticky permissions (0o1777)
+/// to prevent host umask stripping from causing EACCES when container processes drop privileges.
+pub fn ensure_tmp_sticky_bit(root_dir: &Path) -> Result<()> {
+    for tmp_rel in &["tmp", "var/tmp"] {
+        let p = root_dir.join(tmp_rel);
+        let _ = fs::create_dir_all(&p);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o1777));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_layer_preserves_tmp_sticky_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("rootfs");
+
+        // Build a minimal uncompressed tar archive with a dummy file
+        let mut tar_builder = tar::Builder::new(Vec::new());
+        let data = b"hello";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("etc/issue").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append(&header, &data[..]).unwrap();
+        let tar_bytes = tar_builder.into_inner().unwrap();
+
+        extract_layer(&tar_bytes[..], &root, false).unwrap();
+
+        assert!(root.join("etc/issue").exists());
+
+        // Verify /tmp and /var/tmp exist and have sticky permissions
+        let tmp_path = root.join("tmp");
+        let var_tmp_path = root.join("var/tmp");
+        assert!(tmp_path.is_dir());
+        assert!(var_tmp_path.is_dir());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp_mode = fs::metadata(&tmp_path).unwrap().permissions().mode() & 0o7777;
+            let var_tmp_mode = fs::metadata(&var_tmp_path).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(tmp_mode, 0o1777);
+            assert_eq!(var_tmp_mode, 0o1777);
+        }
+    }
 }

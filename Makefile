@@ -6,16 +6,16 @@ WORKSPACE_DIR := $(CURDIR)/krun-microvm
 all: build sign
 
 help:
-	@echo "libkrun-sdk: Pure-Rust MicroVM Virtualization Platform"
-	@echo "======================================================="
+	@echo "cro: Pure-Rust MicroVM Virtualization & Orchestration Platform"
+	@echo "==============================================================="
 	@echo "Usage: make [TARGET] [PREFIX=/custom/bin]"
 	@echo ""
 	@echo "Core Targets:"
 	@echo "  make build       - Compile all SDK workspace crates (debug mode)"
 	@echo "  make release     - Compile all SDK binaries with optimizations & codesign"
-	@echo "  make test        - Run all 107+ unit & integration tests"
+	@echo "  make test        - Run all 129+ unit & integration tests"
 	@echo "  make sign        - Apply macOS Hypervisor.framework entitlement to binaries"
-	@echo "  make install     - Install all binaries (microvm, runner, shim, operator)"
+	@echo "  make install     - Install all binaries (cro, microvm, runner, shim, operator)"
 	@echo "  make preflight   - Run system virtualization preflight validation"
 	@echo "  make info        - Display system, hypervisor, and microVM telemetry"
 	@echo "  make clean       - Remove compiled build artifacts"

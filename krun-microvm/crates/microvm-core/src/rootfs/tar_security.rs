@@ -71,7 +71,10 @@ pub fn ensure_no_symlink_parents(root_dir: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Validates that a symlink target, if relative, does not traverse above the `root_dir`.
+/// Validates that a symlink target (whether relative or absolute) does not escape `root_dir`.
+/// Relative symlinks are resolved from `symlink_path`'s parent directory.
+/// Absolute symlinks are interpreted as relative to `root_dir` (container root), and validated to ensure
+/// they do not escape `root_dir` via parent components ('..').
 pub fn validate_symlink_target(root_dir: &Path, symlink_path: &Path, target: &Path) -> Result<()> {
     if target.is_relative() {
         let parent = symlink_path.parent().unwrap_or(root_dir);
@@ -91,6 +94,25 @@ pub fn validate_symlink_target(root_dir: &Path, symlink_path: &Path, target: &Pa
                     current.pop();
                 }
                 _ => {}
+            }
+        }
+    } else {
+        let mut current = root_dir.to_path_buf();
+        for comp in target.components() {
+            match comp {
+                Component::Normal(c) => current.push(c),
+                Component::ParentDir => {
+                    if current == root_dir || !current.starts_with(root_dir) {
+                        bail!(
+                            "Security violation: absolute symlink target {:?} from {:?} escapes container root {:?}",
+                            target,
+                            symlink_path,
+                            root_dir
+                        );
+                    }
+                    current.pop();
+                }
+                Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
             }
         }
     }
@@ -144,6 +166,26 @@ mod tests {
         let link2 = Path::new("/tmp/rootfs/opt/tool");
         let target2 = Path::new("../../outside");
         assert!(validate_symlink_target(root, link2, target2).is_err());
+    }
+
+    #[test]
+    fn test_validate_symlink_target_absolute() {
+        let root = Path::new("/tmp/rootfs");
+        let link = Path::new("/tmp/rootfs/bin/sh");
+
+        // Safe absolute targets inside container root
+        let target_safe = Path::new("/bin/busybox");
+        assert!(validate_symlink_target(root, link, target_safe).is_ok());
+
+        let target_nested = Path::new("/usr/lib/libc.so");
+        assert!(validate_symlink_target(root, link, target_nested).is_ok());
+
+        // Dangerous absolute targets attempting to traverse out with '..'
+        let target_escape = Path::new("/../../etc/shadow");
+        assert!(validate_symlink_target(root, link, target_escape).is_err());
+
+        let target_escape2 = Path::new("/opt/../../../host_secret");
+        assert!(validate_symlink_target(root, link, target_escape2).is_err());
     }
 
     #[test]

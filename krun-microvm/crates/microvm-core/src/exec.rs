@@ -144,8 +144,13 @@ pub async fn exec_in_microvm(
         }
     }
 
-    // 3. Direct guest rootfs execution fallback
-    exec_in_guest_rootfs(rootfs_path, req).await
+    // 3. Fail explicitly if no hypervisor guest agent is reachable.
+    // Silently falling back to running guest binaries directly on the host OS kernel
+    // breaks container isolation and causes ENOEXEC failures on non-Linux hosts.
+    bail!(
+        "Cannot execute command in microVM: guest execution agent is not reachable via vsock socket '{}' or TCP agent. Ensure the microVM is running with an active guest agent.",
+        socket_path.display()
+    );
 }
 
 /// Executes a command via the in-guest TCP agent over loopback.
@@ -176,7 +181,12 @@ pub async fn exec_via_tcp_agent(host: &str, port: u16, req: &ExecRequest) -> Res
     Ok(resp)
 }
 
-/// Executes a command directly within the isolated instance rootfs.
+/// Executes a command directly on the host using rootfs as working directory.
+///
+/// # Security Notice
+/// This function executes commands directly on the host OS kernel. It is intended
+/// for offline container provisioning, rootfs setup, or mock testing environments.
+/// In-microVM execution in live instances must use [`exec_in_microvm`].
 pub async fn exec_in_guest_rootfs(rootfs_path: &Path, req: &ExecRequest) -> Result<ExecResponse> {
     if !rootfs_path.exists() {
         bail!(
@@ -289,5 +299,19 @@ mod tests {
         let resp = exec_in_guest_rootfs(tmp.path(), &req).await.unwrap();
         assert_eq!(resp.exit_code, 0);
         assert!(resp.stdout.contains("krun-exec-test"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_in_microvm_unreachable_fails_safely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("nonexistent.sock");
+        let rootfs = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        let req = ExecRequest::new(vec!["echo".to_string(), "hello".to_string()]);
+        let res = exec_in_microvm(&sock, &rootfs, &req).await;
+        assert!(res.is_err());
+        let err = res.err().unwrap().to_string();
+        assert!(err.contains("not reachable"));
     }
 }

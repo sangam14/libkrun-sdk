@@ -299,7 +299,12 @@ impl Task for KrunTask {
                 let stdout_fifo = exec_inst.stdout.clone();
                 let stderr_fifo = exec_inst.stderr.clone();
 
-                let exec_res = microvm_core::exec_in_guest_rootfs(&rootfs, &exec_req).await;
+                let vsock_sock = parent.bundle.join("vsock-exec.sock");
+                let exec_res = if vsock_sock.exists() || parent.bundle.join("agent.port").exists() {
+                    microvm_core::exec_in_microvm(&vsock_sock, &rootfs, &exec_req).await
+                } else {
+                    microvm_core::exec_in_guest_rootfs(&rootfs, &exec_req).await
+                };
                 let (code, out, err) = match exec_res {
                     Ok(resp) => (resp.exit_code as u32, resp.stdout, resp.stderr),
                     Err(e) => (126, String::new(), e.to_string()),

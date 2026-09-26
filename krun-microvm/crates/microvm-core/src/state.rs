@@ -96,6 +96,47 @@ impl VmState {
     }
 }
 
+/// Atomically writes content to a destination file using an ephemeral staging file and atomic rename.
+static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Atomically writes content to a destination file using an ephemeral staging file and atomic rename.
+/// This prevents partial reads by concurrent readers and guards against write interruptions.
+pub fn atomic_write<P: AsRef<Path>, C: AsRef<[u8]>>(dest: P, contents: C) -> Result<()> {
+    let dest = dest.as_ref();
+    let dir = dest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid destination path: no parent"))?;
+    fs::create_dir_all(dir)?;
+    let filename = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("target");
+    let count = ATOMIC_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = dir.join(format!(
+        ".{}.tmp.{}.{}.{}",
+        filename,
+        std::process::id(),
+        count,
+        nonce
+    ));
+
+    if let Err(e) = fs::write(&tmp_path, contents) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, dest) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+
+    Ok(())
+}
+
 pub struct StateManager;
 
 impl StateManager {
@@ -105,10 +146,9 @@ impl StateManager {
 
     pub fn save(data_dir: &Path, state: &VmState) -> Result<PathBuf> {
         let dir = Self::state_dir(data_dir);
-        fs::create_dir_all(&dir)?;
         let file_path = dir.join(format!("{}.json", state.id));
         let data = serde_json::to_string_pretty(state)?;
-        fs::write(&file_path, data)?;
+        atomic_write(&file_path, data.as_bytes())?;
         Ok(file_path)
     }
 
@@ -327,7 +367,7 @@ impl StateManager {
                             runner_cfg.num_vcpus = cpus;
                         }
                         if let Ok(updated) = serde_json::to_string_pretty(&runner_cfg) {
-                            let _ = fs::write(&cfg_path, updated);
+                            let _ = atomic_write(&cfg_path, updated.as_bytes());
                         }
                     }
                 }
@@ -465,6 +505,11 @@ impl StateManager {
             crate::rootfs::tar_security::sanitize_tar_path(&rootfs, Path::new(guest_rel_path))?;
         crate::rootfs::tar_security::ensure_no_symlink_parents(&rootfs, &target_guest)?;
 
+        // If target_guest itself is a symlink, remove it to prevent writing through to target
+        if target_guest.is_symlink() {
+            let _ = fs::remove_file(&target_guest);
+        }
+
         if src_host.is_dir() {
             copy_dir_all(src_host, &target_guest)?;
         } else {
@@ -496,12 +541,26 @@ impl StateManager {
             crate::rootfs::tar_security::sanitize_tar_path(&rootfs, Path::new(guest_rel_path))?;
         crate::rootfs::tar_security::ensure_no_symlink_parents(&rootfs, &src_guest)?;
 
-        if src_guest.is_symlink() {
+        let final_src = if src_guest.is_symlink() {
             let target = fs::read_link(&src_guest)?;
             crate::rootfs::tar_security::validate_symlink_target(&rootfs, &src_guest, &target)?;
-        }
+            // If target is absolute, resolve relative to container rootfs, not host root
+            let resolved = if target.is_absolute() {
+                let rel = target.strip_prefix("/").unwrap_or(&target);
+                rootfs.join(rel)
+            } else {
+                let parent = src_guest.parent().unwrap_or(&rootfs);
+                parent.join(&target)
+            };
+            if !resolved.starts_with(&rootfs) {
+                bail!("Security violation: symlink resolves outside container rootfs");
+            }
+            resolved
+        } else {
+            src_guest
+        };
 
-        if !src_guest.exists() && !src_guest.is_symlink() {
+        if !final_src.exists() && !final_src.is_symlink() {
             bail!(
                 "Path '{}' not found inside microVM '{}'",
                 guest_rel_path,
@@ -509,13 +568,13 @@ impl StateManager {
             );
         }
 
-        if src_guest.is_dir() {
-            copy_dir_all(&src_guest, dst_host)?;
+        if final_src.is_dir() {
+            copy_dir_all(&final_src, dst_host)?;
         } else {
             if let Some(parent) = dst_host.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&src_guest, dst_host)?;
+            fs::copy(&final_src, dst_host)?;
         }
         Ok(())
     }
@@ -1086,5 +1145,38 @@ mod tests {
         assert_eq!(restored.id, "vm-tar-restored");
         let data = fs::read_to_string(restored.instance_dir.join("rootfs/app/data.json")).unwrap();
         assert_eq!(data, r#"{"model":"mistral"}"#);
+    }
+
+    #[test]
+    fn test_atomic_save_concurrent() {
+        use std::sync::Arc;
+        let dir = tempdir().unwrap();
+        let dir_path = Arc::new(dir.path().to_path_buf());
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let dp = Arc::clone(&dir_path);
+            handles.push(std::thread::spawn(move || {
+                let vm = VmState {
+                    id: "vm-concurrent".to_string(),
+                    pid: 0,
+                    image: format!("alpine:3.{}", i),
+                    created_at: 100 + i as u64,
+                    port_forwards: vec![],
+                    instance_dir: PathBuf::from("/tmp/concurrent"),
+                    status: VmStatus::Stopped,
+                    vcpus: Some(2),
+                    memory_mib: Some(512),
+                };
+                StateManager::save(&dp, &vm).unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let loaded = StateManager::find(dir.path(), "vm-concurrent").unwrap();
+        assert!(loaded.is_some());
     }
 }
