@@ -211,6 +211,9 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         for host in &cfg.allow_hosts {
             gvproxy_cfg = gvproxy_cfg.allow_net(host);
         }
+        if !cfg.dns_servers.is_empty() {
+            gvproxy_cfg = gvproxy_cfg.dns_search_domains(cfg.dns_servers.clone());
+        }
         let inst = gvproxy_cfg
             .start()
             .context("Failed to start gvproxy network in runner")?;

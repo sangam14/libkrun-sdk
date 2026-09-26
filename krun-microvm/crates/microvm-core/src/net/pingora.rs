@@ -4,7 +4,7 @@
 //! Cloudflare Pingora integration for high-performance L4/L7 Ingress, Reverse Proxying,
 //! and Zero-Trust Egress filtering in `libkrun-sdk`.
 
-use crate::net::egress::{EgressPolicy, SecretSubstitution};
+use crate::net::egress::{parse_host_port, EgressPolicy, SecretSubstitution};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -33,9 +33,9 @@ pub struct PingoraRequestContext {
 /// Zero-Trust Egress Proxy implemented as a Cloudflare Pingora HTTP/HTTPS proxy.
 ///
 /// Features:
-/// 1. Default-deny domain whitelisting with wildcard support (`*.github.com`).
-/// 2. Strict cloud metadata defense (blocks SSRF to `169.254.169.254`).
-/// 3. In-flight secret substitution (replaces `krun-secret:KEY` with real credentials).
+/// 1. Default-deny domain whitelisting with wildcard (`*.github.com`) and CIDR support.
+/// 2. Strict cloud metadata defense (blocks SSRF to `169.254.169.254`, `100.100.100.200`, `fd00:ec2::254`).
+/// 3. In-flight secret substitution in headers, URI queries, and request body chunks.
 /// 4. Upstream connection pooling with HTTP/1.1 and HTTP/2 multiplexing.
 /// 5. Streaming LLM token ceiling budget enforcement.
 pub struct PingoraEgressProxy {
@@ -91,20 +91,19 @@ impl ProxyHttp for PingoraEgressProxy {
             .or_else(|| req_header.uri.host())
             .unwrap_or("unknown");
 
-        let (target_host, target_port, is_tls) = if let Some((h, p)) = host.split_once(':') {
-            let port = p.parse::<u16>().unwrap_or(443);
-            (h.to_string(), port, port == 443)
-        } else {
-            let is_https = req_header.uri.scheme_str() == Some("https");
-            let port = if is_https { 443 } else { 80 };
-            (host.to_string(), port, is_https)
+        let is_https = req_header.uri.scheme_str() == Some("https");
+        let default_port = if is_https { 443 } else { 80 };
+
+        let (target_host, target_port) = match parse_host_port(host, default_port) {
+            Ok((h, p)) => (h, p),
+            Err(_) => (host.to_string(), default_port),
         };
 
         ctx.target_host = target_host.clone();
         ctx.target_port = target_port;
-        ctx.is_tls = is_tls;
+        ctx.is_tls = target_port == 443 || is_https;
 
-        // Verify egress policy (domain whitelist & AWS/cloud metadata protection)
+        // Verify egress policy (domain whitelist, CIDR & cloud metadata protection)
         if !self.policy.is_allowed(&target_host, target_port) {
             ctx.blocked = true;
             tracing::warn!(
@@ -139,7 +138,12 @@ impl ProxyHttp for PingoraEgressProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
-        let peer_addr = format!("{}:{}", ctx.target_host, ctx.target_port);
+        let peer_addr = if ctx.target_host.contains(':') && !ctx.target_host.starts_with('[') {
+            format!("[{}]:{}", ctx.target_host, ctx.target_port)
+        } else {
+            format!("{}:{}", ctx.target_host, ctx.target_port)
+        };
+
         let mut peer = Box::new(HttpPeer::new(
             peer_addr,
             ctx.is_tls,
@@ -154,18 +158,29 @@ impl ProxyHttp for PingoraEgressProxy {
         Ok(peer)
     }
 
-    /// Rewrites outbound request headers and body for in-flight secret substitution.
+    /// Rewrites outbound request headers and URI query for in-flight secret substitution.
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora::Result<()> {
-        // Substitute secrets in HTTP request headers
+        // 1. Substitute in URI (path and query parameters, e.g. ?key=krun-secret:API_KEY)
+        let uri_str = upstream_request.uri.to_string();
+        if uri_str.contains("krun-secret:") || uri_str.contains("krun-secret%3A") || uri_str.contains("krun-secret%3a") {
+            let substituted = self.secret_substitution.substitute(uri_str.as_bytes());
+            if let Ok(new_uri_str) = std::str::from_utf8(&substituted) {
+                if let Ok(new_uri) = new_uri_str.parse::<http::Uri>() {
+                    upstream_request.set_uri(new_uri);
+                }
+            }
+        }
+
+        // 2. Substitute in HTTP request headers
         let mut updates = Vec::new();
         for (name, value) in upstream_request.headers.iter() {
             if let Ok(val_str) = value.to_str() {
-                if val_str.contains("krun-secret:") {
+                if val_str.contains("krun-secret:") || val_str.contains("krun-secret%3A") || val_str.contains("krun-secret%3a") {
                     let substituted = self.secret_substitution.substitute(val_str.as_bytes());
                     if let Ok(new_val) = std::str::from_utf8(&substituted) {
                         updates.push((name.clone(), new_val.to_string()));
@@ -175,6 +190,21 @@ impl ProxyHttp for PingoraEgressProxy {
         }
         for (name, new_val) in updates {
             let _ = upstream_request.insert_header(name, new_val);
+        }
+        Ok(())
+    }
+
+    /// Rewrites outbound request body chunks for in-flight secret substitution.
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        if let Some(ref chunk) = body {
+            let substituted = self.secret_substitution.substitute(chunk);
+            *body = Some(Bytes::from(substituted));
         }
         Ok(())
     }
@@ -218,6 +248,23 @@ pub struct MicroVmServiceBackend {
     pub service_name: String,
     pub target_addr: SocketAddr,
     pub path_prefix: String,
+    pub strip_prefix: bool,
+}
+
+impl MicroVmServiceBackend {
+    pub fn new(service_name: impl Into<String>, target_addr: SocketAddr, path_prefix: impl Into<String>) -> Self {
+        Self {
+            service_name: service_name.into(),
+            target_addr,
+            path_prefix: path_prefix.into(),
+            strip_prefix: false,
+        }
+    }
+
+    pub fn with_strip_prefix(mut self, strip: bool) -> Self {
+        self.strip_prefix = strip;
+        self
+    }
 }
 
 /// Dynamic Ingress and Reverse Proxy Gateway for MicroVMs and Compose Services.
@@ -248,13 +295,33 @@ impl ProxyHttp for PingoraMicroVmGateway {
     ) -> pingora::Result<bool> {
         let path = session.req_header().uri.path();
 
+        // Built-in Health check endpoint for ingress gateway
+        if path == "/healthz" || path == "/_health" || path == "/_gateway/health" {
+            let mut resp = ResponseHeader::build(200, None)?;
+            resp.append_header("Content-Type", "application/json")?;
+            resp.append_header("X-Gateway", "Pingora-libkrun-microvm")?;
+            let body = format!(
+                r#"{{"status":"ok","engine":"Cloudflare-Pingora","routes_count":{}}}"#,
+                self.routes.len()
+            );
+            session.write_response_header(Box::new(resp), false).await?;
+            session
+                .write_response_body(Some(Bytes::from(body)), true)
+                .await?;
+            return Ok(true);
+        }
+
         // Route matching by longest prefix
         let mut matched: Option<&MicroVmServiceBackend> = None;
         for (prefix, backend) in self.routes.iter() {
-            if path.starts_with(prefix)
-                && (matched.is_none() || prefix.len() > matched.unwrap().path_prefix.len())
+            let normalized_prefix = prefix.trim_end_matches('/');
+            if path == normalized_prefix
+                || path.starts_with(&format!("{}/", normalized_prefix))
+                || path.starts_with(prefix)
             {
-                matched = Some(backend);
+                if matched.is_none() || prefix.len() > matched.unwrap().path_prefix.len() {
+                    matched = Some(backend);
+                }
             }
         }
 
@@ -274,6 +341,41 @@ impl ProxyHttp for PingoraMicroVmGateway {
                 .await?;
             Ok(true)
         }
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        if let Some(backend) = ctx.as_ref() {
+            if backend.strip_prefix {
+                let current_path = upstream_request.uri.path();
+                let new_path = if let Some(stripped) = current_path.strip_prefix(&backend.path_prefix) {
+                    if stripped.is_empty() {
+                        "/".to_string()
+                    } else if !stripped.starts_with('/') {
+                        format!("/{}", stripped)
+                    } else {
+                        stripped.to_string()
+                    }
+                } else {
+                    current_path.to_string()
+                };
+
+                let query_str = upstream_request
+                    .uri
+                    .query()
+                    .map(|q| format!("?{}", q))
+                    .unwrap_or_default();
+                let full_uri = format!("{}{}", new_path, query_str);
+                if let Ok(uri) = full_uri.parse::<http::Uri>() {
+                    upstream_request.set_uri(uri);
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn upstream_peer(
@@ -372,18 +474,39 @@ mod tests {
                 service_name: "api-service".to_string(),
                 target_addr: "127.0.0.1:8080".parse().unwrap(),
                 path_prefix: "/api".to_string(),
+                strip_prefix: false,
             },
         );
         routes.insert(
             "/web".to_string(),
-            MicroVmServiceBackend {
-                service_name: "web-service".to_string(),
-                target_addr: "127.0.0.1:3000".parse().unwrap(),
-                path_prefix: "/web".to_string(),
-            },
+            MicroVmServiceBackend::new(
+                "web-service",
+                "127.0.0.1:3000".parse().unwrap(),
+                "/web",
+            )
+            .with_strip_prefix(true),
         );
 
         let gateway = PingoraMicroVmGateway::new(routes);
         assert_eq!(gateway.routes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pingora_egress_body_secret_substitution() {
+        let policy = EgressPolicy::new(vec!["api.openai.com:443".to_string()]);
+        let secrets = vec![("OPENAI_API_KEY".to_string(), "sk-prod-12345".to_string())];
+        let proxy = PingoraEgressProxy::new(policy, &secrets, None);
+
+        let input_body = Bytes::from(r#"{"api_key":"krun-secret:OPENAI_API_KEY","prompt":"hi"}"#);
+        let mut body_opt = Some(input_body);
+
+        if let Some(ref chunk) = body_opt {
+            let substituted = proxy.secret_substitution.substitute(chunk);
+            body_opt = Some(Bytes::from(substituted));
+        }
+
+        let result_str = String::from_utf8(body_opt.unwrap().to_vec()).unwrap();
+        assert!(result_str.contains("sk-prod-12345"));
+        assert!(!result_str.contains("krun-secret:OPENAI_API_KEY"));
     }
 }

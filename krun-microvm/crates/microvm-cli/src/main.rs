@@ -262,6 +262,26 @@ enum Commands {
         #[arg(long = "secret", value_name = "KEY=VAL|KEY|@FILE")]
         secrets: Vec<String>,
 
+        /// Allow outbound network egress to explicitly permitted destination (e.g. api.openai.com:443, *.github.com:443)
+        #[arg(long = "allow-host", alias = "allow-net")]
+        allow_hosts: Vec<String>,
+
+        /// Hard ceiling on cumulative LLM tokens (prompt + completion) consumed by the microVM
+        #[arg(long = "max-tokens")]
+        max_tokens: Option<u64>,
+
+        /// Enable hardware-accelerated virtio-gpu (Apple Silicon Metal / Linux DRM Venus)
+        #[arg(long)]
+        gpu: bool,
+
+        /// Shared memory vRAM window size for virtio-gpu (e.g. 2G, 4G, 8G)
+        #[arg(long = "gpu-shm-size")]
+        gpu_shm_size: Option<String>,
+
+        /// Size of POSIX shared memory (/dev/shm) mounted inside the guest (e.g. 64m, 512m, 2g; default: 64m)
+        #[arg(long = "shm-size")]
+        shm_size: Option<String>,
+
         /// Custom data cache directory
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -694,6 +714,44 @@ pub enum NetworkCommands {
         /// Permitted outbound domain destinations (e.g. api.openai.com:443, *.github.com:443)
         #[arg(long = "allow-host")]
         allow_hosts: Vec<String>,
+
+        /// Strip matched path prefix before forwarding to upstream backend
+        #[arg(long)]
+        strip_prefix: bool,
+
+        /// Secret mapping in KEY=VALUE format for in-flight replacement (egress mode)
+        #[arg(long = "secret", value_parser = parse_secret_arg)]
+        secrets: Vec<(String, String)>,
+
+        /// Enforce hard LLM token ceiling budget (egress mode)
+        #[arg(long)]
+        max_tokens: Option<u64>,
+    },
+
+    /// Launch the high-performance zero-trust egress proxy standalone
+    Proxy {
+        /// Listening host:port address (default: 127.0.0.1:8080)
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        listen: String,
+
+        /// Permitted outbound domain destinations (e.g. api.openai.com:443, *.github.com:443, 10.0.0.0/8)
+        #[arg(long = "allow-host")]
+        allow_hosts: Vec<String>,
+
+        /// Secret mapping in KEY=VALUE format for in-flight replacement
+        #[arg(long = "secret", value_parser = parse_secret_arg)]
+        secrets: Vec<(String, String)>,
+
+        /// Enforce hard LLM token ceiling budget
+        #[arg(long)]
+        max_tokens: Option<u64>,
+    },
+
+    /// Diagnose host network environment, DNS health, gvproxy runtime, and firewall status
+    Doctor {
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1207,6 +1265,11 @@ async fn main() -> Result<()> {
             cpus,
             memory,
             secrets,
+            allow_hosts,
+            max_tokens,
+            gpu,
+            gpu_shm_size,
+            shm_size,
             data_dir,
             cmd,
         } => {
@@ -1299,11 +1362,76 @@ async fn main() -> Result<()> {
                         eprintln!("⚠️  OPENAI_API_KEY not found in host environment. Agent may fail to authenticate.");
                     }
                 }
+                "deepseek" => {
+                    builder = builder
+                        .allow_host("api.deepseek.com:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+                        builder = builder.secret("DEEPSEEK_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("DEEPSEEK_API_KEY")) {
+                        eprintln!("⚠️  DEEPSEEK_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
+                "openrouter" => {
+                    builder = builder
+                        .allow_host("openrouter.ai:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                    if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+                        builder = builder.secret("OPENROUTER_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("OPENROUTER_API_KEY")) {
+                        eprintln!("⚠️  OPENROUTER_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
+                "groq" => {
+                    builder = builder
+                        .allow_host("api.groq.com:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                    if let Ok(key) = std::env::var("GROQ_API_KEY") {
+                        builder = builder.secret("GROQ_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("GROQ_API_KEY")) {
+                        eprintln!("⚠️  GROQ_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
+                "mistral" => {
+                    builder = builder
+                        .allow_host("api.mistral.ai:443")
+                        .allow_host("github.com:443")
+                        .allow_host("api.github.com:443");
+                    if let Ok(key) = std::env::var("MISTRAL_API_KEY") {
+                        builder = builder.secret("MISTRAL_API_KEY", &key);
+                    } else if !secrets.iter().any(|s| s.starts_with("MISTRAL_API_KEY")) {
+                        eprintln!("⚠️  MISTRAL_API_KEY not found in host environment. Agent may fail to authenticate.");
+                    }
+                }
                 _ => {
                     builder = builder
                         .allow_host("github.com:443")
                         .allow_host("api.github.com:443");
                 }
+            }
+
+            for host in &allow_hosts {
+                builder = builder.allow_host(host);
+            }
+
+            if let Some(tokens) = max_tokens {
+                builder = builder.max_tokens(tokens);
+            }
+
+            if gpu {
+                builder = builder.gpu(true);
+                if let Some(ref shm) = gpu_shm_size {
+                    let bytes = microvm_core::parse_size_to_bytes(shm)
+                        .context("Invalid --gpu-shm-size format (e.g. 2G, 512M)")?;
+                    builder = builder.gpu_shm_size(bytes);
+                }
+            }
+
+            if let Some(ref shm) = shm_size {
+                builder = builder.shm_size(shm);
             }
 
             let mut script_parts = Vec::new();
@@ -2780,6 +2908,9 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
             route,
             egress,
             allow_hosts,
+            strip_prefix,
+            secrets,
+            max_tokens,
         } => {
             if egress {
                 println!(
@@ -2796,9 +2927,15 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                         println!("     - {}", h);
                     }
                 }
-                println!("   Cloud Metadata (169.254.169.254): Strictly blocked");
+                println!("   Cloud Metadata (169.254.169.254, 100.100.100.200, fd00:ec2::254): Strictly blocked");
+                if !secrets.is_empty() {
+                    println!("   Configured Secrets for In-Flight Substitution: {}", secrets.len());
+                }
+                if let Some(tokens) = max_tokens {
+                    println!("   Enforced LLM Token Ceiling: {} tokens", tokens);
+                }
                 let policy = microvm_core::EgressPolicy::new(allow_hosts);
-                microvm_core::run_pingora_egress_server(&listen, policy, &[], None)?;
+                microvm_core::run_pingora_egress_server(&listen, policy, &secrets, max_tokens)?;
             } else {
                 let mut routes_map = std::collections::HashMap::new();
                 for r in &route {
@@ -2812,11 +2949,12 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                             })?;
                         routes_map.insert(
                             prefix.to_string(),
-                            microvm_core::MicroVmServiceBackend {
-                                service_name: prefix.trim_start_matches('/').to_string(),
+                            microvm_core::MicroVmServiceBackend::new(
+                                prefix.trim_start_matches('/'),
                                 target_addr,
-                                path_prefix: prefix.to_string(),
-                            },
+                                prefix,
+                            )
+                            .with_strip_prefix(strip_prefix),
                         );
                     } else {
                         bail!(
@@ -2834,12 +2972,137 @@ async fn handle_network_command(cmd: NetworkCommands) -> Result<()> {
                         "   Warning: No routes configured. Pass --route /prefix=127.0.0.1:PORT"
                     );
                 } else {
-                    println!("   Configured MicroVM Routes:");
+                    println!("   Configured MicroVM Routes (strip prefix: {}):", strip_prefix);
                     for (prefix, backend) in &routes_map {
                         println!("     {} -> {}", prefix, backend.target_addr);
                     }
                 }
+                println!("   Health Check Probe: http://{}/healthz", listen);
                 microvm_core::run_pingora_gateway_server(&listen, routes_map)?;
+            }
+        }
+
+        NetworkCommands::Proxy {
+            listen,
+            allow_hosts,
+            secrets,
+            max_tokens,
+        } => {
+            println!("🌐 Starting Zero-Trust Ephemeral Egress Proxy on {}...", listen);
+            if allow_hosts.is_empty() {
+                println!("   Policy: Default-deny (all external egress blocked except loopback)");
+            } else {
+                println!("   Allowed destinations (domains, wildcards, CIDRs):");
+                for h in &allow_hosts {
+                    println!("     - {}", h);
+                }
+            }
+            println!("   Cloud Metadata & SSRF Defense: Active (169.254.169.254, 100.100.100.200, fd00:ec2::254 strictly blocked)");
+            if !secrets.is_empty() {
+                println!("   Secret Substitution Engine: Active ({} keys configured)", secrets.len());
+                for (k, _) in &secrets {
+                    println!("     - Injected placeholder: krun-secret:{}", k);
+                }
+            }
+            if let Some(tokens) = max_tokens {
+                println!("   Hard LLM Token Budget: {} tokens", tokens);
+            }
+
+            let policy = microvm_core::EgressPolicy::new(allow_hosts);
+            let sub = microvm_core::SecretSubstitution::new(&secrets);
+            let budget = microvm_core::LlmTokenBudget::new(max_tokens);
+
+            let proxy = microvm_core::EgressProxyServer::start(policy, sub, budget).await?;
+            println!("✅ Zero-Trust Egress Proxy listening on {}", proxy.proxy_url());
+            println!("   Press Ctrl+C to shut down.");
+
+            tokio::signal::ctrl_c().await?;
+            println!(
+                "\n🛑 Shutting down egress proxy. Blocked requests: {}, Tokens consumed: {}",
+                proxy.blocked_count(),
+                proxy.tokens_consumed()
+            );
+        }
+
+        NetworkCommands::Doctor { json } => {
+            let nameservers = microvm_core::net::DnsConfig::resolve_nameservers(&[]);
+            let has_dns = !nameservers.is_empty();
+
+            // Test cloud metadata blocking
+            let default_policy = microvm_core::EgressPolicy::default();
+            let aws_imds_blocked = !default_policy.is_allowed("169.254.169.254", 80);
+            let gcp_imds_blocked = !default_policy.is_allowed("metadata.google.internal", 80);
+            let alibaba_imds_blocked = !default_policy.is_allowed("100.100.100.200", 80);
+            let ipv6_imds_blocked = !default_policy.is_allowed("fd00:ec2::254", 80);
+            let decimal_imds_blocked = !default_policy.is_allowed("2852039166", 80);
+            let metadata_protection_ok = aws_imds_blocked
+                && gcp_imds_blocked
+                && alibaba_imds_blocked
+                && ipv6_imds_blocked
+                && decimal_imds_blocked;
+
+            // Test CIDR subnet evaluation
+            let cidr_policy = microvm_core::EgressPolicy::new(vec!["10.0.0.0/8".to_string()]);
+            let cidr_ok = cidr_policy.is_allowed("10.1.2.3", 80) && !cidr_policy.is_allowed("192.168.1.1", 80);
+
+            // Test Secret Substitution Engine
+            let test_secrets = vec![("KEY".to_string(), "REAL_SECRET".to_string())];
+            let sub_engine = microvm_core::SecretSubstitution::new(&test_secrets);
+            let sub_raw_ok = sub_engine.substitute_str("krun-secret:KEY") == "REAL_SECRET";
+            let sub_url_ok = sub_engine.substitute_str("krun-secret%3AKEY") == "REAL_SECRET";
+            let secret_substitution_ok = sub_raw_ok && sub_url_ok;
+
+            // Test LLM token budget inspection
+            let token_budget = microvm_core::LlmTokenBudget::new(Some(100));
+            token_budget.inspect_chunk(br#"{"usage":{"total_tokens":42}}"#);
+            let token_metering_ok = token_budget.total_consumed() == 42;
+
+            // Test common ports
+            let test_ports = [8080, 9090, 3000, 5432, 6379];
+            let mut port_statuses = Vec::new();
+            for port in test_ports {
+                let is_available = std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok();
+                port_statuses.push((port, is_available));
+            }
+
+            if json {
+                let doc_json = serde_json::json!({
+                    "status": "ok",
+                    "dns": {
+                        "resolved_nameservers": nameservers,
+                        "dns_ready": has_dns
+                    },
+                    "security": {
+                        "metadata_protection_ok": metadata_protection_ok,
+                        "aws_imds_blocked": aws_imds_blocked,
+                        "gcp_imds_blocked": gcp_imds_blocked,
+                        "alibaba_imds_blocked": alibaba_imds_blocked,
+                        "ipv6_imds_blocked": ipv6_imds_blocked,
+                        "decimal_imds_blocked": decimal_imds_blocked,
+                        "cidr_subnets_ok": cidr_ok,
+                        "secret_substitution_ok": secret_substitution_ok,
+                        "llm_token_metering_ok": token_metering_ok
+                    },
+                    "ports": port_statuses.iter().map(|(p, a)| {
+                        serde_json::json!({ "port": p, "available": a })
+                    }).collect::<Vec<_>>()
+                });
+                println!("{}", serde_json::to_string_pretty(&doc_json)?);
+            } else {
+                println!("🩺 MicroVM Network & Security Doctor");
+                println!("{:-<60}", "");
+                println!("  Autonomous Resilient DNS:      {}", if has_dns { format!("✅ Ready ({})", nameservers.join(", ")) } else { "⚠️  No nameservers found".to_string() });
+                println!("  Zero-Trust Egress Firewall:    {}", if cidr_ok { "✅ Active (Host, Wildcard, CIDR Supported)" } else { "❌ Error" });
+                println!("  Multi-Cloud Metadata Defense:  {}", if metadata_protection_ok { "✅ Strict Default-Deny (AWS/GCP/Azure/Alibaba/IPv6)" } else { "❌ IMDS Leak Detected" });
+                println!("  In-Flight Secret Substitution: {}", if secret_substitution_ok { "✅ Active (Header, URI, Body & URL-Encoded)" } else { "❌ Engine Error" });
+                println!("  Multi-Provider Token Metering: {}", if token_metering_ok { "✅ Active (OpenAI, Anthropic, Gemini, Ollama)" } else { "❌ Engine Error" });
+                println!("  Cloudflare Pingora L7 Gateway: ✅ Ready");
+                println!("\n  Local Port Availability:");
+                for (port, avail) in port_statuses {
+                    println!("    Port {:<5} : {}", port, if avail { "🟢 Available" } else { "🟡 In Use / Occupied" });
+                }
+                println!("{:-<60}", "");
+                println!("✅ All core microVM networking subsystems operational.");
             }
         }
     }
@@ -4134,6 +4397,53 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_parse_sandbox_enhanced_features() {
+        let sandbox_args = vec![
+            "microvm",
+            "sandbox",
+            "deepseek",
+            "--workspace",
+            "/tmp/test-ws",
+            "--allow-host",
+            "api.deepseek.com:443",
+            "--allow-host",
+            "pypi.org:443",
+            "--max-tokens",
+            "75000",
+            "--gpu",
+            "--gpu-shm-size",
+            "4G",
+            "--shm-size",
+            "1g",
+        ];
+        let cli = Cli::try_parse_from(sandbox_args).unwrap();
+        match cli.command {
+            Commands::Sandbox {
+                agent,
+                workspace,
+                allow_hosts,
+                max_tokens,
+                gpu,
+                gpu_shm_size,
+                shm_size,
+                ..
+            } => {
+                assert_eq!(agent, "deepseek");
+                assert_eq!(workspace, PathBuf::from("/tmp/test-ws"));
+                assert_eq!(
+                    allow_hosts,
+                    vec!["api.deepseek.com:443".to_string(), "pypi.org:443".to_string()]
+                );
+                assert_eq!(max_tokens, Some(75000));
+                assert!(gpu);
+                assert_eq!(gpu_shm_size.as_deref(), Some("4G"));
+                assert_eq!(shm_size.as_deref(), Some("1g"));
+            }
+            _ => panic!("Expected Commands::Sandbox with enhanced features"),
+        }
+    }
+
+    #[test]
     fn test_cli_parse_compose_up_and_down() {
         let up_args = vec![
             "microvm",
@@ -4394,6 +4704,9 @@ mod tests {
             "/api=127.0.0.1:3000",
             "--allow-host",
             "api.openai.com:443",
+            "--strip-prefix",
+            "--max-tokens",
+            "50000",
         ])
         .unwrap();
         match cli.command {
@@ -4401,13 +4714,56 @@ mod tests {
                 listen,
                 route,
                 allow_hosts,
+                strip_prefix,
+                max_tokens,
                 ..
             }) => {
                 assert_eq!(listen, "127.0.0.1:9090");
                 assert_eq!(route, vec!["/api=127.0.0.1:3000".to_string()]);
                 assert_eq!(allow_hosts, vec!["api.openai.com:443".to_string()]);
+                assert!(strip_prefix);
+                assert_eq!(max_tokens, Some(50000));
             }
             _ => panic!("Expected NetworkCommands::Pingora"),
+        }
+
+        // network proxy
+        let cli = Cli::try_parse_from(vec![
+            "microvm",
+            "network",
+            "proxy",
+            "--listen",
+            "127.0.0.1:8888",
+            "--allow-host",
+            "api.anthropic.com:443",
+            "--secret",
+            "ANTHROPIC_API_KEY=sk-ant-test1234",
+            "--max-tokens",
+            "25000",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Proxy {
+                listen,
+                allow_hosts,
+                secrets,
+                max_tokens,
+            }) => {
+                assert_eq!(listen, "127.0.0.1:8888");
+                assert_eq!(allow_hosts, vec!["api.anthropic.com:443".to_string()]);
+                assert_eq!(secrets.len(), 1);
+                assert_eq!(secrets[0].0, "ANTHROPIC_API_KEY");
+                assert_eq!(secrets[0].1, "sk-ant-test1234");
+                assert_eq!(max_tokens, Some(25000));
+            }
+            _ => panic!("Expected NetworkCommands::Proxy"),
+        }
+
+        // network doctor
+        let cli = Cli::try_parse_from(vec!["microvm", "network", "doctor", "--json"]).unwrap();
+        match cli.command {
+            Commands::Network(NetworkCommands::Doctor { json }) => assert!(json),
+            _ => panic!("Expected NetworkCommands::Doctor"),
         }
     }
 

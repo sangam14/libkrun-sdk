@@ -97,7 +97,11 @@ impl DnsConfig {
                 if trimmed.starts_with("nameserver ") {
                     let ip_str = trimmed.trim_start_matches("nameserver ").trim();
                     if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                        if !ip.is_loopback() {
+                        let is_link_local = match ip {
+                            IpAddr::V4(v4) => v4.is_link_local(),
+                            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+                        };
+                        if !ip.is_loopback() && !is_link_local {
                             host_servers.push(ip.to_string());
                         }
                     }
@@ -173,7 +177,7 @@ impl DnsConfig {
         let env_path = etc_dir.join("environment");
         let mut current_env = fs::read_to_string(&env_path).unwrap_or_default();
         let proxy_lines = format!(
-            "\nHTTP_PROXY={proxy_url}\nHTTPS_PROXY={proxy_url}\nhttp_proxy={proxy_url}\nhttps_proxy={proxy_url}\nALL_PROXY={proxy_url}\nNO_PROXY=localhost,127.0.0.1\nno_proxy=localhost,127.0.0.1\n"
+            "\nHTTP_PROXY={proxy_url}\nHTTPS_PROXY={proxy_url}\nhttp_proxy={proxy_url}\nhttps_proxy={proxy_url}\nALL_PROXY={proxy_url}\nall_proxy={proxy_url}\nNO_PROXY=localhost,127.0.0.1,::1,192.168.127.0/24,.local\nno_proxy=localhost,127.0.0.1,::1,192.168.127.0/24,.local\n"
         );
         current_env.push_str(&proxy_lines);
         fs::write(&env_path, current_env)?;
@@ -182,7 +186,7 @@ impl DnsConfig {
         let profile_dir = etc_dir.join("profile.d");
         fs::create_dir_all(&profile_dir)?;
         let profile_script = format!(
-            "export HTTP_PROXY=\"{proxy_url}\"\nexport HTTPS_PROXY=\"{proxy_url}\"\nexport http_proxy=\"{proxy_url}\"\nexport https_proxy=\"{proxy_url}\"\nexport ALL_PROXY=\"{proxy_url}\"\nexport NO_PROXY=\"localhost,127.0.0.1\"\nexport no_proxy=\"localhost,127.0.0.1\"\n"
+            "export HTTP_PROXY=\"{proxy_url}\"\nexport HTTPS_PROXY=\"{proxy_url}\"\nexport http_proxy=\"{proxy_url}\"\nexport https_proxy=\"{proxy_url}\"\nexport ALL_PROXY=\"{proxy_url}\"\nexport all_proxy=\"{proxy_url}\"\nexport NO_PROXY=\"localhost,127.0.0.1,::1,192.168.127.0/24,.local\"\nexport no_proxy=\"localhost,127.0.0.1,::1,192.168.127.0/24,.local\"\n"
         );
         fs::write(profile_dir.join("krun_proxy.sh"), profile_script)?;
 

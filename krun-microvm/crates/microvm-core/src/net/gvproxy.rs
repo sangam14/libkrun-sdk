@@ -69,6 +69,35 @@ impl GvproxyConfig {
         self
     }
 
+    /// Set MTU (default: 1500).
+    pub fn mtu(mut self, mtu: usize) -> Self {
+        self.mtu = mtu;
+        self
+    }
+
+    /// Enable verbose gvproxy debug logging.
+    pub fn debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    /// Add a DNS search domain.
+    pub fn dns_search_domain(mut self, domain: impl Into<String>) -> Self {
+        self.dns_search_domains.push(domain.into());
+        self
+    }
+
+    /// Add multiple DNS search domains.
+    pub fn dns_search_domains(
+        mut self,
+        domains: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        for d in domains {
+            self.dns_search_domains.push(d.into());
+        }
+        self
+    }
+
     /// Add a port forward mapping (host port -> guest port).
     pub fn add_forward(mut self, host_port: u16, guest_port: u16) -> Self {
         let local = format!("0.0.0.0:{}", host_port);
@@ -110,6 +139,13 @@ pub struct GvproxyInstance {
 impl GvproxyInstance {
     /// Start a new gvproxy instance from configuration.
     pub fn start(config: &GvproxyConfig) -> Result<Self> {
+        let sock_path = Path::new(&config.socket_path);
+        if let Some(parent) = sock_path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+
         let json_str = serde_json::to_string(config)
             .context("Failed to serialize gvproxy configuration to JSON")?;
         let c_json =
@@ -233,6 +269,9 @@ impl Drop for GvproxyInstance {
         unsafe {
             libgvproxy_sys::gvproxy_destroy(self.id as c_longlong);
         }
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
     }
 }
 
@@ -246,6 +285,10 @@ mod tests {
             .subnet("192.168.100.0/24")
             .guest_ip("192.168.100.2")
             .gateway_ip("192.168.100.1")
+            .mtu(9000)
+            .debug(true)
+            .dns_search_domain("cluster.local")
+            .dns_search_domain("krun.internal")
             .add_forward(8080, 80)
             .allow_net("github.com")
             .allow_net("crates.io");
@@ -253,6 +296,9 @@ mod tests {
         assert_eq!(config.subnet, "192.168.100.0/24");
         assert_eq!(config.guest_ip, "192.168.100.2");
         assert_eq!(config.gateway_ip, "192.168.100.1");
+        assert_eq!(config.mtu, 9000);
+        assert!(config.debug);
+        assert_eq!(config.dns_search_domains, vec!["cluster.local", "krun.internal"]);
         assert_eq!(
             config.forwards.get("0.0.0.0:8080").unwrap(),
             "192.168.100.2:80"
